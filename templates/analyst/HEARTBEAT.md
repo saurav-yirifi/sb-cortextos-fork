@@ -133,7 +133,56 @@ When done:
 cortextos bus complete-task "<task_id>" "<summary of what was produced>"
 ```
 
-## Step 8: Update long-term memory (if applicable)
+## Step 8: Boss-failover check (BL-003 phase 3)
+
+If boss is stale AND a `profile_quota_exhausted` event for boss
+appears in the recent event log, you have a bounded authority to
+edit `boss/config.json` and issue a soft-restart on boss's behalf
+(boss can't run the failover skill if its own session has died).
+
+```bash
+# Is boss stale? read-all-heartbeats is the only available CLI;
+# filter to boss in jq and compare last_heartbeat to now.
+NOW_EPOCH=$(date -u +%s)
+BOSS_HB=$(cortextos bus read-all-heartbeats --format json \
+  | jq -r --arg agent "$CTX_ORCHESTRATOR_AGENT" \
+      '.[] | select(.agent == $agent) | .last_heartbeat // empty')
+if [ -z "$BOSS_HB" ]; then
+  BOSS_AGE_MINUTES=999  # no heartbeat record at all → treat as stale
+else
+  BOSS_AGE_MINUTES=$(( (NOW_EPOCH - $(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$BOSS_HB" +%s 2>/dev/null || date -u -d "$BOSS_HB" +%s)) / 60 ))
+fi
+
+# Did boss quota-exhaust in the last 5 minutes? cortextOS doesn't
+# expose a list-events CLI; read the analytics JSONL directly.
+EVENTS_FILE=~/.cortextos/$CTX_INSTANCE_ID/orgs/$CTX_ORG/analytics/events/$CTX_ORCHESTRATOR_AGENT/$(date -u +%F).jsonl
+CUTOFF=$(date -u -v-5M +%FT%TZ 2>/dev/null || date -u -d '5 min ago' +%FT%TZ)
+RECENT_EXHAUST=0
+if [ -f "$EVENTS_FILE" ]; then
+  RECENT_EXHAUST=$(jq -c --arg cutoff "$CUTOFF" \
+    'select(.event == "profile_quota_exhausted" and .timestamp > $cutoff)' \
+    "$EVENTS_FILE" 2>/dev/null | wc -l | tr -d ' ')
+fi
+```
+
+If `BOSS_AGE_MINUTES > 5` AND `$RECENT_EXHAUST > 0`:
+
+```bash
+# Use the same atomic primitive boss would have used on itself
+cortextos profile-failover --agent $CTX_ORCHESTRATOR_AGENT --trigger <event_id>
+```
+
+On exit 0, log the failover and notify Saurav:
+```bash
+cortextos bus log-event action analyst_boss_failover info --meta '{"trigger_event_id":"<id>","reason":"boss-quota-exhausted-and-stale"}'
+cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "🔄 boss failed over to fallback (boss-quota-exhausted, analyst executed). Soft-restart dispatched."
+```
+
+On exit non-zero, notify Saurav and stop — your authority is
+bounded to this exact condition (see `GUARDRAILS.md`). Outside it,
+edits to `boss/config.json` require explicit user approval.
+
+## Step 9: Update long-term memory (if applicable)
 
 If you learned something this cycle that should persist across sessions:
 - Patterns that work/don't work

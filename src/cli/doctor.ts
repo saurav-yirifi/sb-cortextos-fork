@@ -355,12 +355,20 @@ export const doctorCommand = new Command('doctor')
               const cfgPath = join(agentsDir, agentName, 'config.json');
               if (!existsSync(cfgPath)) continue;
               try {
-                const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8')) as { claude_profile?: unknown };
-                const ref = cfg.claude_profile;
-                if (typeof ref === 'string' && ref) {
-                  const list = referencedBy.get(ref) ?? [];
-                  list.push(agentName);
-                  referencedBy.set(ref, list);
+                const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8')) as {
+                  claude_profile?: unknown;
+                  fallback_profile?: unknown;
+                };
+                // Active profile + phase-3 fallback profile both
+                // count as references — a dangling fallback fails
+                // boss's runbook just as silently as a dangling
+                // active profile fails the spawn path.
+                for (const ref of [cfg.claude_profile, cfg.fallback_profile]) {
+                  if (typeof ref === 'string' && ref) {
+                    const list = referencedBy.get(ref) ?? [];
+                    if (!list.includes(agentName)) list.push(agentName);
+                    referencedBy.set(ref, list);
+                  }
                 }
               } catch { /* skip malformed config */ }
             }
@@ -399,6 +407,50 @@ export const doctorCommand = new Command('doctor')
               ? `Edit orgs/${org}/profiles.json or the offending agent config.json`
               : undefined,
           });
+        }
+      } catch { /* ignore scan errors */ }
+    }
+
+    // BL-003 phase 3: analyst boss-failover doc drift check.
+    //
+    // The active org's analyst HEARTBEAT.md + GUARDRAILS.md are
+    // gitignored — the canonical version lives in templates/analyst/.
+    // When a phase-3+ change updates the templates, the active doc
+    // can silently drift (the auditor-misses-themselves trap class).
+    // This check warns when the active doc is older than the
+    // template by file mtime — operator action: re-sync the active
+    // copy from the template (a one-line `cp` per file).
+    //
+    // Per-org mtime check; warn-level only (the active doc may be
+    // intentionally diverged for that org's workflow).
+    const templatesAnalystDir = join(frameworkRoot, 'templates', 'analyst');
+    if (existsSync(templatesAnalystDir) && existsSync(orgsRoot)) {
+      try {
+        for (const org of readdirSync(orgsRoot, { withFileTypes: true })
+          .filter(d => d.isDirectory())
+          .map(d => d.name)) {
+          const activeAnalystDir = join(orgsRoot, org, 'agents', 'analyst');
+          if (!existsSync(activeAnalystDir)) continue;
+          const drifted: string[] = [];
+          for (const f of ['HEARTBEAT.md', 'GUARDRAILS.md']) {
+            const tpl = join(templatesAnalystDir, f);
+            const active = join(activeAnalystDir, f);
+            if (!existsSync(tpl) || !existsSync(active)) continue;
+            const tplMtime = statSync(tpl).mtimeMs;
+            const activeMtime = statSync(active).mtimeMs;
+            if (tplMtime > activeMtime) {
+              const ageDays = Math.floor((tplMtime - activeMtime) / (24 * 60 * 60 * 1000));
+              drifted.push(`${f} (template ${ageDays}d newer)`);
+            }
+          }
+          if (drifted.length) {
+            checks.push({
+              name: `Analyst doc drift (${org})`,
+              status: 'warn',
+              message: `Template newer than active: ${drifted.join(', ')}`,
+              fix: `Diff and re-sync: diff -u templates/analyst/<file> orgs/${org}/agents/analyst/<file>`,
+            });
+          }
         }
       } catch { /* ignore scan errors */ }
     }
