@@ -70,4 +70,4 @@ The context-discipline monitor computes severity from `current_loaded_tokens / c
 | orange | `/compact` NOW with surgical instructions (use *At phase boundary* if reachable, else *Mid-task emergency*) |
 | red | Hard-restart with `--continue` (use *Before unrelated-task hard-restart* template, OR if same task: hard-restart with --continue still — `/compact` at this point is too late) |
 
-Source: [BL-2026-05-08-004](../../orgs/sb-personal/backlog/BL-2026-05-08-004-engineer-context-discipline.md). Thresholds tuneable after 1-2 weeks of observation.
+Source: BL-2026-05-08-004 (engineer context discipline) — sb-personal-org-only spec; not part of the upstream cortextOS installer payload. Adopting orgs can re-derive the threshold tables from observed Claude Code auto-compact pressure points (~350-450k on 1M Opus, ~150-160k on 200k models). Thresholds tuneable after 1-2 weeks of observation.

@@ -101,9 +101,14 @@ export function encodeCwdToProjectDir(cwd: string): string {
 //   - Sonnet / Haiku / unknown  → 200k
 //
 // If you deploy an Opus agent that should be on 200k, you MUST set
-// CLAUDE_CODE_DISABLE_1M_CONTEXT=true on its spawn env — otherwise this
-// monitor will under-trigger /compact actions. There is no transcript-side
-// signal to disambiguate, so the env flag IS the authoritative input.
+// CLAUDE_CODE_DISABLE_1M_CONTEXT=true in its `.env` file. The daemon's PTY
+// spawn path sources `.env` into the spawned Claude Code process and into
+// any subprocess invoked from heartbeat (including `cortextos bus
+// context-update`). There is no transcript-side signal to disambiguate, so
+// the env flag IS the authoritative input. The `cortextos add-agent`
+// scaffolder writes `# CLAUDE_CODE_DISABLE_1M_CONTEXT=true` as a
+// commented-out template line in generated `.env`s; flipping a live agent
+// off Opus-1M means uncommenting it by hand and restarting the agent.
 export function resolveContextLimit(env: NodeJS.ProcessEnv, modelHint: string): number {
   const flag = (env.CLAUDE_CODE_DISABLE_1M_CONTEXT ?? '').toLowerCase();
   const disabled = flag === 'true' || flag === '1' || flag === 'yes';
