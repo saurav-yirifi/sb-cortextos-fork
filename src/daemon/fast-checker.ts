@@ -885,9 +885,54 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
   }
 
   /**
+   * Write a green-severity sentinel into context-pct.json after a Tier-2
+   * handoff or Tier-3 force-restart. Preserves context_limit + model from
+   * the previous-session file so a 1M-opus agent doesn't briefly see a
+   * 200k limit before the next statusLine fire overwrites the entry.
+   * Falls back to 200_000 / "" when the prior file is absent or unreadable.
+   */
+  private writeContextResetFile(): void {
+    const statusPath = join(this.paths.stateDir, 'context-pct.json');
+    let priorLimit = 200_000;
+    let priorModel = '';
+    try {
+      if (existsSync(statusPath)) {
+        const prior = JSON.parse(readFileSync(statusPath, 'utf-8'));
+        if (typeof prior.context_limit === 'number' && prior.context_limit > 0) {
+          priorLimit = prior.context_limit;
+        }
+        if (typeof prior.model === 'string') priorModel = prior.model;
+      }
+    } catch { /* fall through to defaults */ }
+    try {
+      writeFileSync(statusPath, JSON.stringify({
+        agent: this.agent.name, session_id: '', transcript_path: 'reset://post-handoff',
+        model: priorModel, context_limit: priorLimit, current_loaded_tokens: 0,
+        pct: 0, severity: 'green', next_action_threshold_pct: 50,
+        updated_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      }));
+    } catch { /* non-fatal */ }
+  }
+
+  /**
    * Context monitor — called on every poll cycle.
-   * Reads context_status.json written by the statusLine bridge hook and takes
-   * action when thresholds are crossed.
+   *
+   * Reads context-pct.json written by the statusLine hook (BL-2026-05-08-004
+   * Phase 2 — consolidated source of truth, shared schema with the heartbeat-driven
+   * `cortextos bus context-update` CLI). Takes action when ctx_warning_threshold /
+   * ctx_handoff_threshold (per-agent config overrides) are crossed.
+   *
+   * This is Layer 2 (daemon-forced) of the BL-004 two-layer model. Layer 1
+   * (agent-cooperative `/compact` at safe boundaries) lives in HEARTBEAT.md
+   * Step 3a; this monitor is the safety net for agents that ignore Layer 1
+   * or stop responding.
+   *
+   * Model-aware tuning: operators set ctx_handoff_threshold to match the
+   * "red" severity boundary for their agent's context tier (50 for 1M opus,
+   * 85 for 200k models). The threshold tables in src/monitor/context-usage.ts
+   * are the canonical reference. Future work may switch this to severity-driven
+   * triggers; for now the pct-override approach preserves backwards compat
+   * with operator-configured agents.
    */
   private async checkContextStatus(): Promise<void> {
     const now = Date.now();
@@ -904,8 +949,9 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
       }
     }
 
-    // Read the bridge file written by hook-context-status
-    const statusPath = join(this.paths.stateDir, 'context_status.json');
+    // Read the bridge file written by hook-context-status (Phase 2 schema:
+    // context-pct.json with severity / pct / context_limit / current_loaded_tokens).
+    const statusPath = join(this.paths.stateDir, 'context-pct.json');
     if (!existsSync(statusPath)) return;
 
     let pct: number | null = null;
@@ -913,10 +959,20 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     try {
       const raw = readFileSync(statusPath, 'utf-8');
       const data = JSON.parse(raw);
-      const age = now - new Date(data.written_at || 0).getTime();
+      // Phase 2 schema uses `updated_at` (was `written_at` in the legacy file).
+      // Tolerate both during the migration window — `updated_at` first, fall
+      // back to `written_at` so an agent that hasn't restarted post-migration
+      // still works with whatever the old hook wrote.
+      const ts = data.updated_at || data.written_at || 0;
+      const age = now - new Date(ts).getTime();
       if (age > 10 * 60_000) return; // stale file — skip
-      pct = typeof data.used_percentage === 'number' ? data.used_percentage : null;
-      exceeds200k = Boolean(data.exceeds_200k_tokens);
+      pct = typeof data.pct === 'number'
+        ? data.pct
+        : (typeof data.used_percentage === 'number' ? data.used_percentage : null);
+      // Phase 1/2 schema doesn't carry exceeds_200k_tokens explicitly; derive
+      // it from context_limit when available (legacy file may set it directly).
+      const ctxLimit = typeof data.context_limit === 'number' ? data.context_limit : 0;
+      exceeds200k = Boolean(data.exceeds_200k_tokens) || (ctxLimit > 0 && ctxLimit > 200_000 && pct !== null && pct >= (200_000 / ctxLimit) * 100);
 
       // Detect new session: if session_id changed, clear stale per-session ctx state.
       // This handles the case where the agent self-restarts (voluntary handoff) and the
@@ -970,11 +1026,10 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     if (effectivePct >= handoff && this.ctxHandoffFiredAt === 0) {
       this.ctxHandoffFiredAt = now;
       this.ctxHandoffDeadlineAt = now + 5 * 60_000; // 5min grace for agent to cooperate
-      // Reset context_status.json so the new session doesn't re-trigger immediately
-      const statusPath = join(this.paths.stateDir, 'context_status.json');
-      try {
-        writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
-      } catch { /* non-fatal */ }
+      // Reset context-pct.json so the new session doesn't re-trigger immediately.
+      // Preserves prior context_limit + model so a 1M-opus agent isn't briefly
+      // mis-reported as 200k between this write and the next statusLine fire.
+      this.writeContextResetFile();
       const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z';
       const handoffPrompt = `[CONTEXT HANDOFF REQUIRED] Context is at ${Math.round(effectivePct)}%. Write a handoff document to memory/handoffs/handoff-${ts}.md with these sections: ## Current Tasks, ## Next Actions, ## Active Crons, ## Key Context, ## Files Modified This Session. Then run: cortextos bus hard-restart --reason "context handoff at ${Math.round(effectivePct)}%" --handoff-doc <absolute path to the handoff doc you just wrote>. Do this NOW before the context window is exhausted.`;
       this.agent.injectMessage(handoffPrompt);
@@ -1041,12 +1096,10 @@ Reply using: cortextos bus send-telegram ${chatId} '<your reply>'
     // Write .force-fresh + .restart-planned (hardRestart from src/bus/system.ts)
     hardRestart(this.paths, this.agent.name, `CONTEXT-FORCE-RESTART: ${reason}`);
 
-    // Reset context_status.json so the new session's FastChecker doesn't re-trigger
-    // Tier 2 immediately by reading the stale high-% value from the previous session.
-    const statusPath = join(this.paths.stateDir, 'context_status.json');
-    try {
-      writeFileSync(statusPath, JSON.stringify({ used_percentage: 0, exceeds_200k_tokens: false, written_at: new Date().toISOString() }));
-    } catch { /* non-fatal */ }
+    // Reset context-pct.json so the new session's FastChecker doesn't re-trigger
+    // Tier 2 immediately by reading the stale high-pct value from the previous session.
+    // Preserves prior context_limit + model (see writeContextResetFile).
+    this.writeContextResetFile();
 
     // sessionRefresh() does stop() + start(); shouldContinue() will return false
     // because .force-fresh was just written, giving us a clean fresh session.
