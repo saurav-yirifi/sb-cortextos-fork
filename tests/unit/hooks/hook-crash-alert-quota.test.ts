@@ -106,16 +106,29 @@ describe('detectProfileQuotaExhaustion', () => {
     });
   });
 
-  it('returns the FIRST matched pattern by array order (deterministic)', () => {
-    // If a log somehow contains BOTH a rate_limit_exceeded and a
-    // credit_balance_too_low (unusual but possible if multiple
-    // requests fail in the trailing window), the emitted error_pattern
-    // should be stable. Array order is the priority — highest-signal
-    // first. Locks the contract so a future array reorder is a
-    // visible diff in this test.
+  it('returns the FIRST matched pattern by array-priority order (independent of textual position)', () => {
+    // If a log contains BOTH patterns, array-priority order — not
+    // textual occurrence order — must determine the winner.
+    // Fixture writes credit_balance_too_low FIRST in the text and
+    // rate_limit_exceeded SECOND, but rate_limit_exceeded comes
+    // EARLIER in the QUOTA_PATTERNS array (priority slot 0 vs 1).
+    // The detector iterates QUOTA_PATTERNS; the array-first match
+    // wins regardless of where in the file each signature lives.
+    //
+    // If a future PR reorders QUOTA_PATTERNS, this test breaks
+    // visibly — that's the protection.
     writeFileSync(
       logPath,
-      'first: credit_balance_too_low\nthen: rate_limit_exceeded\n',
+      'line A — credit_balance_too_low\nline B — rate_limit_exceeded\n',
+      'utf-8',
+    );
+    expect(detectProfileQuotaExhaustion(logPath).pattern).toBe('rate_limit_exceeded');
+
+    // Reversed text order — same outcome, proving the priority
+    // is array-driven, not text-position-driven.
+    writeFileSync(
+      logPath,
+      'line A — rate_limit_exceeded\nline B — credit_balance_too_low\n',
       'utf-8',
     );
     expect(detectProfileQuotaExhaustion(logPath).pattern).toBe('rate_limit_exceeded');
@@ -189,6 +202,7 @@ describe('emitProfileQuotaExhausted', () => {
       profile: 'personal',
       error_pattern: 'rate_limit_exceeded',
       observed_at: '2026-05-08T20:00:00Z',
+      exit_code: null,
     });
     expect(execFileMock).toHaveBeenCalledTimes(1);
     const [bin, args] = execFileMock.mock.calls[0];
@@ -205,6 +219,7 @@ describe('emitProfileQuotaExhausted', () => {
       profile: 'personal',
       error_pattern: 'rate_limit_exceeded',
       observed_at: '2026-05-08T20:00:00Z',
+      exit_code: null,
     });
   });
 
@@ -216,11 +231,30 @@ describe('emitProfileQuotaExhausted', () => {
       profile: null,
       error_pattern: 'http_429',
       observed_at: '2026-05-08T20:00:00Z',
+      exit_code: null,
     });
     expect(execFileMock).toHaveBeenCalledTimes(1);
     const [, args] = execFileMock.mock.calls[0];
     const meta = JSON.parse(args[6]);
     expect(meta.profile).toBeNull();
+  });
+
+  it('emits exit_code=null in metadata (spec field reserved for phase 3)', () => {
+    // Spec line 109 names exit_code in the metadata. Phase 2 doesn't
+    // parse stdin for session context, but the field is emitted as
+    // explicit null (not undefined / omitted) so phase-3 boss code
+    // doing `if (meta.exit_code != null)` gets unambiguous semantics.
+    emitProfileQuotaExhausted({
+      agent: 'x',
+      profile: null,
+      error_pattern: 'http_429',
+      observed_at: 't',
+      exit_code: null,
+    });
+    const [, args] = execFileMock.mock.calls[0];
+    const meta = JSON.parse(args[6]);
+    expect(Object.keys(meta)).toContain('exit_code');
+    expect(meta.exit_code).toBeNull();
   });
 
   it('does not throw when execFile itself throws (best-effort contract)', () => {
@@ -233,6 +267,7 @@ describe('emitProfileQuotaExhausted', () => {
         profile: null,
         error_pattern: 'http_429',
         observed_at: 't',
+        exit_code: null,
       }),
     ).not.toThrow();
   });

@@ -14,10 +14,47 @@
  *     broken watchdog loop results in at most one notification, not a buzz
  *     storm.
  */
-import { existsSync, readFileSync, writeFileSync, appendFileSync, unlinkSync, mkdirSync, statSync } from 'fs';
+import {
+  existsSync, readFileSync, writeFileSync, appendFileSync,
+  unlinkSync, mkdirSync, statSync, openSync, readSync, closeSync,
+} from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { execFile } from 'child_process';
+
+/**
+ * Read at most `maxBytes` from the END of `logPath`. Bounded disk
+ * read — does NOT load the whole file into memory before slicing
+ * (the prior pattern of `readFileSync(path).slice(-N)` would pull
+ * a 500MB log into RAM just to discard 99.96% of it).
+ *
+ * Returns `''` on missing file, read error, or zero-byte file.
+ * Never throws — callers are SessionEnd-hook detectors and a hook
+ * crash silently loses the alert window.
+ *
+ * Single source of truth for log-tail reads in this module: both
+ * `detectRateLimitInLog` (UX classifier) and
+ * `detectProfileQuotaExhaustion` (failover signal) call this.
+ */
+function readLogTail(logPath: string, maxBytes: number): string {
+  let fd: number | null = null;
+  try {
+    const size = statSync(logPath).size;
+    if (size === 0) return '';
+    const readBytes = Math.min(size, maxBytes);
+    const start = Math.max(0, size - readBytes);
+    fd = openSync(logPath, 'r');
+    const buf = Buffer.allocUnsafe(readBytes);
+    const got = readSync(fd, buf, 0, readBytes, start);
+    return buf.subarray(0, got).toString('utf-8');
+  } catch {
+    return '';
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
 
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;         // 10 minutes
 const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
@@ -94,22 +131,16 @@ export function detectProfileQuotaExhaustion(logPath: string): {
   matched: boolean;
   pattern: string | null;
 } {
-  try {
-    const size = statSync(logPath).size;
-    const readBytes = Math.min(size, 200 * 1024); // last 200 KB
-    const fd = readFileSync(logPath);
-    const slice = fd.slice(Math.max(0, fd.length - readBytes)).toString('utf-8');
-    // Strip ANSI color codes — Anthropic error messages render with them.
-    const text = slice.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-    for (const { name, regex } of QUOTA_PATTERNS) {
-      if (regex.test(text)) {
-        return { matched: true, pattern: name };
-      }
+  const slice = readLogTail(logPath, 200 * 1024);
+  if (!slice) return { matched: false, pattern: null };
+  // Strip ANSI color codes — Anthropic error messages render with them.
+  const text = slice.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+  for (const { name, regex } of QUOTA_PATTERNS) {
+    if (regex.test(text)) {
+      return { matched: true, pattern: name };
     }
-    return { matched: false, pattern: null };
-  } catch {
-    return { matched: false, pattern: null };
   }
+  return { matched: false, pattern: null };
 }
 
 /**
@@ -141,14 +172,24 @@ export function emitProfileQuotaExhausted(meta: {
   profile: string | null;
   error_pattern: string;
   observed_at: string;
+  /** Reserved field — spec requires it but the hook does not yet
+   *  parse stdin for session context. Always `null` in phase 2;
+   *  phase-3 boss skill should treat undefined and null
+   *  identically as "exit code unknown". */
+  exit_code: number | null;
 }): void {
   try {
     execFile(
       'cortextos',
       ['bus', 'log-event', 'action', 'profile_quota_exhausted', 'warning', '--meta', JSON.stringify(meta)],
       { timeout: 5_000 },
-      () => { /* fire-and-forget */ },
+      () => { /* async errors land here — never propagate */ },
     );
+    // The outer try/catch covers SYNCHRONOUS throws only (e.g.
+    // JSON.stringify failure, which the typed input prevents).
+    // Async failures from the spawned process surface in the
+    // callback and are deliberately swallowed — the SessionEnd
+    // hook must never crash on a downstream tool failure.
   } catch { /* never throw out of the SessionEnd hook */ }
 }
 
@@ -158,28 +199,22 @@ export function emitProfileQuotaExhausted(meta: {
  * daemon use the same detection logic.
  */
 function detectRateLimitInLog(logPath: string): boolean {
-  try {
-    const size = statSync(logPath).size;
-    const readBytes = Math.min(size, 200 * 1024); // last 200 KB
-    const fd = readFileSync(logPath);
-    const slice = fd.slice(Math.max(0, fd.length - readBytes)).toString('utf-8');
-    const text = slice.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').toLowerCase();
-    return (
-      text.includes('overloaded_error') ||
-      text.includes('rate_limit_error') ||
-      text.includes('rate limit') ||
-      text.includes('rate-limit') ||
-      text.includes('too many requests') ||
-      text.includes('quota exceeded') ||
-      text.includes('usage limit') ||
-      text.includes('weekly limit') ||
-      text.includes('5-hour limit') ||
-      text.includes('5h limit') ||
-      /used \d+% of your/.test(text)
-    );
-  } catch {
-    return false;
-  }
+  const slice = readLogTail(logPath, 200 * 1024);
+  if (!slice) return false;
+  const text = slice.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').toLowerCase();
+  return (
+    text.includes('overloaded_error') ||
+    text.includes('rate_limit_error') ||
+    text.includes('rate limit') ||
+    text.includes('rate-limit') ||
+    text.includes('too many requests') ||
+    text.includes('quota exceeded') ||
+    text.includes('usage limit') ||
+    text.includes('weekly limit') ||
+    text.includes('5-hour limit') ||
+    text.includes('5h limit') ||
+    /used \d+% of your/.test(text)
+  );
 }
 
 /**
@@ -330,12 +365,22 @@ async function main(): Promise<void> {
       }
     }
     if (quotaMatch.matched && quotaMatch.pattern) {
-      const agentDir = process.env.CTX_AGENT_DIR || process.cwd();
+      // Surface the env-fallback path explicitly: an unset
+      // CTX_AGENT_DIR means we'd be reading config.json from
+      // process.cwd(), which on a hook spawn might be anywhere.
+      // The resulting `profile` would be wrong rather than null,
+      // and phase-3 failover would route to the wrong fallback.
+      // Log to stderr so the operator sees the misconfiguration.
+      const agentDir = process.env.CTX_AGENT_DIR;
+      if (!agentDir) {
+        try { process.stderr.write(`[hook-crash-alert] WARN: CTX_AGENT_DIR unset; profile resolution may be incorrect for agent=${agentName}\n`); } catch { /* ignore */ }
+      }
       emitProfileQuotaExhausted({
         agent: agentName,
-        profile: readClaudeProfile(agentDir),
+        profile: readClaudeProfile(agentDir ?? process.cwd()),
         error_pattern: quotaMatch.pattern,
         observed_at: new Date().toISOString(),
+        exit_code: null,
       });
     }
   }
