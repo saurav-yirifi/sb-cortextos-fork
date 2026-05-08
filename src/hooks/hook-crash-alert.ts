@@ -49,6 +49,110 @@ function isQuietHoursLA(now: Date): boolean {
 }
 
 /**
+ * Profile-quota patterns for BL-003 phase 2.
+ *
+ * Distinct from `detectRateLimitInLog` below: these are the structured
+ * Anthropic API / HTTP error signatures that map to "this profile's
+ * billing/quota is exhausted, switch to its fallback". The
+ * rate-limit detector is a UX-level classifier (broader: includes
+ * "weekly limit", "5h limit", "used 80% of your" — used to suppress
+ * Telegram crash alerts during pause windows). Quota detection is
+ * narrower (regex-only, structured) and emits a bus event boss
+ * subscribes to in phase 3.
+ *
+ * The two intentionally remain separate functions: merging them
+ * would require a single return shape that serves both audiences,
+ * which loses the clean "did we hit a known quota error" check
+ * (boss needs the pattern name; the rate-limit classifier just
+ * needs a boolean).
+ *
+ * Pattern source: spec
+ *   docs/roadmap/v0.4-cortexos-retrofit/... → BL-2026-05-08-003 §"Quota detection".
+ * Validate against any new Anthropic error semantics before adding
+ * patterns — false positives here cascade into spurious failovers.
+ */
+const QUOTA_PATTERNS: ReadonlyArray<{ name: string; regex: RegExp }> = [
+  { name: 'rate_limit_exceeded', regex: /rate_limit_exceeded/i },
+  { name: 'credit_balance_too_low', regex: /credit_balance_too_low/i },
+  { name: 'quota_exceeded', regex: /quota.{0,10}exceeded/i },
+  { name: 'http_429', regex: /HTTP\s+429/ },
+  { name: 'usage_limit_reached', regex: /usage_limit_reached/i },
+];
+
+/**
+ * Scan the tail of `logPath` for any QUOTA_PATTERNS match. Returns the
+ * first match's name (deterministic — array order = priority) so the
+ * emitted `profile_quota_exhausted` event includes a stable
+ * `error_pattern` field rather than the full matched substring (which
+ * could carry secrets / stack frames / megabytes of context).
+ *
+ * Returns `{ matched: false, pattern: null }` on missing log, read
+ * error, or no match. Never throws — this runs on the SessionEnd hook
+ * path and a hook crash would silently lose the alert window.
+ */
+export function detectProfileQuotaExhaustion(logPath: string): {
+  matched: boolean;
+  pattern: string | null;
+} {
+  try {
+    const size = statSync(logPath).size;
+    const readBytes = Math.min(size, 200 * 1024); // last 200 KB
+    const fd = readFileSync(logPath);
+    const slice = fd.slice(Math.max(0, fd.length - readBytes)).toString('utf-8');
+    // Strip ANSI color codes — Anthropic error messages render with them.
+    const text = slice.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    for (const { name, regex } of QUOTA_PATTERNS) {
+      if (regex.test(text)) {
+        return { matched: true, pattern: name };
+      }
+    }
+    return { matched: false, pattern: null };
+  } catch {
+    return { matched: false, pattern: null };
+  }
+}
+
+/**
+ * Read `claude_profile` from the agent's config.json. Returns null
+ * when absent, malformed, or non-string. Caller treats null as
+ * "agent uses default profile" for event metadata — boss's failover
+ * skill (phase 3) checks the registry to find the agent's actual
+ * resolved profile.
+ */
+export function readClaudeProfile(agentDir: string | undefined): string | null {
+  if (!agentDir) return null;
+  try {
+    const cfg = JSON.parse(readFileSync(join(agentDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
+    return typeof cfg.claude_profile === 'string' && cfg.claude_profile ? cfg.claude_profile : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Emit a `profile_quota_exhausted` bus event. Best-effort, fire-and-
+ * forget — a failure here must not block the SessionEnd hook (which
+ * still needs to fire crash alerts, dedup, etc.). Boss subscribes
+ * to this event name in phase 3 and uses the metadata to decide
+ * whether to fail over the agent to its `fallback_profile`.
+ */
+export function emitProfileQuotaExhausted(meta: {
+  agent: string;
+  profile: string | null;
+  error_pattern: string;
+  observed_at: string;
+}): void {
+  try {
+    execFile(
+      'cortextos',
+      ['bus', 'log-event', 'action', 'profile_quota_exhausted', 'warning', '--meta', JSON.stringify(meta)],
+      { timeout: 5_000 },
+      () => { /* fire-and-forget */ },
+    );
+  } catch { /* never throw out of the SessionEnd hook */ }
+}
+
+/**
  * Scan the tail of stdout.log for Anthropic rate-limit or weekly-limit
  * signatures. Mirrors OutputBuffer.hasRateLimitSignature so the hook and the
  * daemon use the same detection logic.
@@ -198,6 +302,41 @@ async function main(): Promise<void> {
     if (existsSync(stdoutPath) && detectRateLimitInLog(stdoutPath)) {
       endType = 'rate-limited';
       reason = 'anthropic rate limit detected in stdout.log';
+    }
+  }
+
+  // BL-003 phase 2: structured quota detection → profile_quota_exhausted bus event.
+  // Independent of the rate-limited reclassification above: an exit
+  // can be classified as 'crash' (no UX rate-limit string) but still
+  // trip a quota pattern in stderr.log (structured Anthropic API
+  // error). Both detectors run; either firing emits the bus event.
+  // Boss's phase-3 failover skill subscribes to this event and uses
+  // the metadata to swap agents to their fallback_profile.
+  //
+  // The event fires even during quiet hours and even if Telegram is
+  // muted — crash alerts are operator-comfort gated, but failover
+  // signal is reliability-gated and must always reach the bus.
+  {
+    const stdoutPath = join(logDir, 'stdout.log');
+    const stderrPath = join(logDir, 'stderr.log');
+    let quotaMatch: { matched: boolean; pattern: string | null } = { matched: false, pattern: null };
+    for (const path of [stderrPath, stdoutPath]) {
+      if (existsSync(path)) {
+        const result = detectProfileQuotaExhaustion(path);
+        if (result.matched) {
+          quotaMatch = result;
+          break;
+        }
+      }
+    }
+    if (quotaMatch.matched && quotaMatch.pattern) {
+      const agentDir = process.env.CTX_AGENT_DIR || process.cwd();
+      emitProfileQuotaExhausted({
+        agent: agentName,
+        profile: readClaudeProfile(agentDir),
+        error_pattern: quotaMatch.pattern,
+        observed_at: new Date().toISOString(),
+      });
     }
   }
 
