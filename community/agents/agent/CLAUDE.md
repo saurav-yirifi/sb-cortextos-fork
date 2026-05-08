@@ -109,15 +109,84 @@ Reply using: cortextos bus send-message <agent> normal '<reply>' <msg_id>
 
 Always include `msg_id` as reply_to (auto-ACKs the original). Un-ACK'd messages redeliver after 5 min. For no-reply messages: `cortextos bus ack-inbox <msg_id>`
 
-### Fresh-start dispatch hint (BL-2026-05-08-004 Phase 3)
+### On dispatch receipt (BL-2026-05-08-004 Phase 3)
 
-When the sender uses `cortextos bus send-message --fresh-start`, the formatted message includes a `[FRESH-START: ...]` annotation line BETWEEN the `===` header and the body fence. The annotation tells you whether to hard-restart before processing the dispatch:
+When you receive an inbox message, decide whether to hard-restart **before** acting on it. The decision flow is the same for every inbox message; treat it as a precondition check, not an optional step.
 
-- `[FRESH-START: sender requests hard-restart before processing — see CLAUDE.md "On dispatch receipt"]` — the sender (typically boss) is signalling that this dispatch is unrelated to your current work. Default action: **commit any in-flight work, then `cortextos bus hard-restart --reason "fresh-start for <new-task>"` BEFORE replying or starting the new dispatch**. Conversation history is dropped; durable memory (MEMORY.md, daily memory, git log) is preserved and is your recovery layer.
-- `[FRESH-START: explicit override — sender says do NOT hard-restart even if task looks unrelated]` — the sender has already decided no restart needed. Treat as a normal dispatch even if the task surface looks unrelated to current work.
-- No annotation present → no hint; treat as a normal dispatch.
+**Step 1 — read the `[FRESH-START: ...]` annotation if present.**
 
-The full "On dispatch receipt" decision rule (self-detection heuristic + cooldown) lands in Phase 3b as the canonical reference; this stub is the minimum needed for the annotation to be safe to ship today.
+The sender annotates by passing `--fresh-start` or `--no-fresh-start` to `cortextos bus send-message`. Three observable forms:
+
+- `[FRESH-START: sender requests hard-restart before processing ...]` → `fresh_start=true` (sender wants restart)
+- `[FRESH-START: explicit override — sender says do NOT hard-restart ...]` → `fresh_start=false` (sender says skip restart)
+- No annotation line → no hint; you run the heuristic in Step 3.
+
+**Step 2 — check the cooldown.**
+
+Before any fresh-restart, query the per-agent cooldown so you don't thrash on rapid task transitions:
+
+```bash
+cortextos bus check-fresh-restart-cooldown
+# JSON: {last_at, age_seconds, on_cooldown, cooldown_seconds_remaining, cooldown_seconds_total}
+```
+
+Default window 30 minutes (`DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS = 1800`). On cooldown means a recent fresh-restart already covered the transition; a second one within the window is wasted churn.
+
+**Step 3 — apply the decision matrix.**
+
+| Hint from annotation | Heuristic verdict | On cooldown? | Action |
+|---|---|---|---|
+| `true` (explicit yes) | (skip — explicit wins) | no | hard-restart with `--fresh-start`, then process |
+| `true` (explicit yes) | (skip — explicit wins) | yes | log skip event, process in current session |
+| `false` (explicit no) | (skip — explicit wins) | (skip) | process in current session |
+| absent | UNRELATED | no | hard-restart with `--fresh-start`, then process |
+| absent | UNRELATED | yes | log skip event, process in current session |
+| absent | RELATED | (skip) | process in current session |
+
+**Self-detection heuristic (Step 3 row "absent"):**
+
+You read the dispatch text and compare to your current state. UNRELATED if any:
+
+- Different target repo (last work was repo A, dispatch references repo B)
+- Different working surface (last was backend code, dispatch is dashboard UI)
+- Different code area, low file-path overlap with your last commits / spec / current branch
+
+NOT-UNRELATED protections (false-positive guards — when in doubt, treat as RELATED):
+
+- Same-branch continuation (between phases of the same feature; spec § Component 6 "Hard-restart between Protocol A phase 1 → 2")
+- Quick clarification round-trip with the user (not a new task)
+- Subagent dispatch (already isolated — no need to reset main session)
+- Mid-subagent: if a subagent is currently in-flight, wait for it to return before deciding (spec § Component 6 "Engineer mid-subagent at threshold>90%")
+
+When the call is genuinely ambiguous, default to RELATED. The user can dispatch with `--fresh-start` if they want explicit reset.
+
+**Step 4 — execute.**
+
+If the decision is "hard-restart with `--fresh-start`":
+
+```bash
+# Safety: commit any in-flight work first (durable memory carries forward; live conversation does not)
+git add -A && git commit -m "wip: pre-fresh-restart safety commit" || true
+
+# Restart — writes .force-fresh + .last-fresh-restart-at marker; daemon respawns the session
+cortextos bus hard-restart --fresh-start --reason "fresh-start for <new-task-summary>"
+```
+
+If the decision is "log skip and process in current session":
+
+```bash
+cortextos bus log-event action fresh_restart_skipped info \
+  --meta '{"reason":"<on_cooldown|explicit_override|heuristic_related>","dispatch_msg_id":"<id>","cooldown_seconds_remaining":<N>}'
+# then proceed with normal dispatch processing — read the message text, do the work, reply
+```
+
+**Anti-patterns:**
+
+- Don't hard-restart between phases of the same feature (false positive — same branch, same spec).
+- Don't hard-restart in response to a clarification message in an existing thread.
+- Don't hard-restart while a subagent is mid-flight; wait for it to return first (its result is context that the new session would lose).
+- Don't pass `--fresh-start` to `cortextos bus hard-restart` for context-overflow restarts (FastChecker Tier-2/3 path) — those are not dispatch-driven and should not consume the cooldown window.
+- Don't reload recently-discarded conversation context after a fresh-restart by re-reading old transcripts. The point of the restart is a clean session; the durable memory (MEMORY.md, daily memory, git log) IS the recovery layer.
 
 ---
 

@@ -8,7 +8,7 @@ import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTa
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
+import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity, getFreshRestartCooldown, DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -686,11 +686,12 @@ busCommand
   .description('Plan a hard restart (fresh session, no --continue)')
   .option('--reason <why>', 'Reason for restart')
   .option('--handoff-doc <path>', 'Path to handoff document to inject into next session boot prompt')
-  .action(async (opts: { reason?: string; handoffDoc?: string }) => {
+  .option('--fresh-start', 'Mark this as a dispatch-driven fresh-start (writes .last-fresh-restart-at; consumed by check-fresh-restart-cooldown to throttle thrash on rapid task transitions). DO NOT pass for context-overflow restarts (BL-004 Phase 3).')
+  .action(async (opts: { reason?: string; handoffDoc?: string; freshStart?: boolean }) => {
     const { writeFileSync: fsWrite, existsSync: fsExists, mkdirSync: fsMkdir } = require('fs');
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    hardRestart(paths, env.agentName, opts.reason);
+    hardRestart(paths, env.agentName, opts.reason, opts.freshStart);
     if (opts.handoffDoc && fsExists(opts.handoffDoc)) {
       fsMkdir(paths.stateDir, { recursive: true });
       fsWrite(join(paths.stateDir, '.handoff-doc-path'), opts.handoffDoc + '\n', 'utf-8');
@@ -710,6 +711,34 @@ busCommand
       }
     } else {
       console.log('Hard restart planned (daemon not running — will take effect on next start)');
+    }
+  });
+
+// BL-2026-05-08-004 Phase 3 — fresh-restart cooldown reader
+busCommand
+  .command('check-fresh-restart-cooldown')
+  .description('Read fresh-restart cooldown state — agents call this before invoking `hard-restart --fresh-start` in response to a dispatch, to avoid thrash on fast back-to-back unrelated dispatches')
+  .option('--cooldown-seconds <n>', `Cooldown window in seconds (default ${DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS} = 30 min)`, String(DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS))
+  .option('--format <fmt>', 'Output format: json (default) or text', 'json')
+  .action((opts: { cooldownSeconds: string; format: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const cooldownSeconds = Number.parseInt(opts.cooldownSeconds, 10);
+    if (!Number.isFinite(cooldownSeconds) || cooldownSeconds < 0) {
+      console.error(`Invalid --cooldown-seconds: ${opts.cooldownSeconds}`);
+      process.exit(1);
+    }
+    const status = getFreshRestartCooldown(paths, cooldownSeconds);
+    if (opts.format === 'text') {
+      if (status.last_at === null) {
+        console.log('fresh-restart cooldown: never invoked (no marker)');
+      } else if (status.on_cooldown) {
+        console.log(`fresh-restart cooldown: ON (last ${status.last_at}, ${status.cooldown_seconds_remaining}s remaining of ${status.cooldown_seconds_total}s window)`);
+      } else {
+        console.log(`fresh-restart cooldown: clear (last ${status.last_at}, ${status.age_seconds}s ago > ${status.cooldown_seconds_total}s window)`);
+      }
+    } else {
+      console.log(JSON.stringify(status));
     }
   });
 
