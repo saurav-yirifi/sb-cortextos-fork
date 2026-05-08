@@ -81,7 +81,9 @@ export const addAgentCommand = new Command('add-agent')
       if (!(options.profile in registry.profiles)) {
         const known = Object.keys(registry.profiles).join(', ') || '(none defined)';
         console.error(
-          `Error: profile "${options.profile}" not in orgs/${org}/profiles.json. Known: ${known}`,
+          `Error: profile "${options.profile}" not in orgs/${org}/profiles.json ` +
+            `(or has an invalid/missing config_dir — the loader silently drops malformed entries). ` +
+            `Known: ${known}`,
         );
         process.exit(1);
       }

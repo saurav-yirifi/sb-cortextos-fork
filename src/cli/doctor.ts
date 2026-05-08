@@ -3,6 +3,7 @@ import { execSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync, statSync, chmodSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { loadProfileRegistry, findDanglingReferences } from '../utils/profiles.js';
 
 interface Check {
   name: string;
@@ -294,16 +295,26 @@ export const doctorCommand = new Command('doctor')
     // profile. Warn-level — missing or malformed registry shouldn't
     // block daemon boot (the spawn path silently degrades to no env
     // override) but the operator should know.
+    //
+    // Dangling-ref detection is delegated to `findDanglingReferences`
+    // from profiles.ts (single source of truth — the spawn path uses
+    // the loader; the doctor must not reimplement the predicate or
+    // the two diverge).
     const orgsRoot = join(frameworkRoot, 'orgs');
     if (existsSync(orgsRoot)) {
       try {
-        for (const org of readdirSync(orgsRoot)) {
+        const orgEntries = readdirSync(orgsRoot, { withFileTypes: true })
+          .filter(d => d.isDirectory())
+          .map(d => d.name);
+        for (const org of orgEntries) {
           const profilesPath = join(orgsRoot, org, 'profiles.json');
           if (!existsSync(profilesPath)) continue;
 
-          let registry: { default_profile?: unknown; profiles?: unknown };
+          // Distinguish parse error from schema error so the operator
+          // gets a fix-shaped message, not a generic "broken registry".
+          let parsed: { default_profile?: unknown; profiles?: unknown };
           try {
-            registry = JSON.parse(readFileSync(profilesPath, 'utf-8'));
+            parsed = JSON.parse(readFileSync(profilesPath, 'utf-8'));
           } catch (err) {
             checks.push({
               name: `Profiles registry (${org})`,
@@ -314,47 +325,68 @@ export const doctorCommand = new Command('doctor')
             continue;
           }
 
-          const def = registry.default_profile;
-          const profiles = registry.profiles;
-          if (typeof def !== 'string' || !def || !profiles || typeof profiles !== 'object') {
+          const registry = loadProfileRegistry(frameworkRoot, org);
+          if (!registry) {
+            // parsed OK but failed loader's schema gate (no default,
+            // wrong shapes, etc.). All entries with bad config_dir
+            // were also dropped during parsing.
             checks.push({
               name: `Profiles registry (${org})`,
               status: 'warn',
-              message: 'Schema invalid — needs default_profile + profiles map',
+              message: 'Schema invalid — needs default_profile + profiles map (entries with non-string config_dir are dropped)',
               fix: `See BL-2026-05-08-003 for the registry shape`,
             });
             continue;
           }
 
-          const profileMap = profiles as Record<string, { config_dir?: unknown }>;
-          const danglingDefault = !(def in profileMap);
+          // Walk agents, build (profile_name → [agent_names]) so the
+          // warn message names which agents are using each dangling
+          // profile. Use a Map for dedup; the previous flat-array
+          // approach miscompared "name" against "agent→name" entries
+          // and emitted N warnings for N agents on the same missing
+          // profile (caught by code-evaluator on phase 1).
+          const referencedBy = new Map<string, string[]>();
+          const agentsDir = join(orgsRoot, org, 'agents');
+          if (existsSync(agentsDir)) {
+            const agentEntries = readdirSync(agentsDir, { withFileTypes: true })
+              .filter(d => d.isDirectory())
+              .map(d => d.name);
+            for (const agentName of agentEntries) {
+              const cfgPath = join(agentsDir, agentName, 'config.json');
+              if (!existsSync(cfgPath)) continue;
+              try {
+                const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8')) as { claude_profile?: unknown };
+                const ref = cfg.claude_profile;
+                if (typeof ref === 'string' && ref) {
+                  const list = referencedBy.get(ref) ?? [];
+                  list.push(agentName);
+                  referencedBy.set(ref, list);
+                }
+              } catch { /* skip malformed config */ }
+            }
+          }
+
+          const dangling = findDanglingReferences(registry, referencedBy.keys());
           const missingDirs: string[] = [];
-          for (const [pname, p] of Object.entries(profileMap)) {
+          // Re-read the raw profiles map for the on-disk dir check —
+          // loadProfileRegistry already filtered out bad config_dirs,
+          // but `parsed` retains them so we can flag unset values too.
+          const rawProfiles = (parsed.profiles ?? {}) as Record<string, { config_dir?: unknown }>;
+          for (const [pname, p] of Object.entries(rawProfiles)) {
             const dir = p?.config_dir;
             if (typeof dir !== 'string' || !dir || !existsSync(dir)) {
               missingDirs.push(`${pname}→${dir ?? '(unset)'}`);
             }
           }
 
-          // Walk agents, collect claude_profile references
-          const dangling: string[] = danglingDefault ? [def] : [];
-          const agentsDir = join(orgsRoot, org, 'agents');
-          if (existsSync(agentsDir)) {
-            for (const agentName of readdirSync(agentsDir)) {
-              const cfgPath = join(agentsDir, agentName, 'config.json');
-              if (!existsSync(cfgPath)) continue;
-              try {
-                const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8')) as { claude_profile?: unknown };
-                const ref = cfg.claude_profile;
-                if (typeof ref === 'string' && ref && !(ref in profileMap) && !dangling.includes(ref)) {
-                  dangling.push(`${agentName}→${ref}`);
-                }
-              } catch { /* skip malformed config */ }
-            }
-          }
-
           const issues: string[] = [];
-          if (dangling.length) issues.push(`dangling refs: ${dangling.join(', ')}`);
+          if (dangling.length) {
+            const annotated = dangling.map(name => {
+              const users = referencedBy.get(name) ?? [];
+              return users.length ? `${name} (used by: ${users.join(', ')})` : name;
+            });
+            issues.push(`dangling refs: ${annotated.join(', ')}`);
+          }
           if (missingDirs.length) issues.push(`config_dir missing on disk: ${missingDirs.join(', ')}`);
 
           checks.push({
@@ -362,7 +394,7 @@ export const doctorCommand = new Command('doctor')
             status: issues.length ? 'warn' : 'pass',
             message: issues.length
               ? issues.join('; ')
-              : `${Object.keys(profileMap).length} profile(s); default=${def}`,
+              : `${Object.keys(registry.profiles).length} profile(s); default=${registry.default_profile}`,
             fix: issues.length
               ? `Edit orgs/${org}/profiles.json or the offending agent config.json`
               : undefined,
