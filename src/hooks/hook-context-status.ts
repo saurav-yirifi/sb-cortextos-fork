@@ -20,7 +20,7 @@
  * statusLine hook blocks Claude Code's status bar rendering.
  */
 
-import { statSync } from 'fs';
+import { statSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 
@@ -69,6 +69,15 @@ async function main(): Promise<void> {
   if (!usage) return;
 
   writeContextUsage(stateDir, usage);
+
+  // One-shot legacy-state migration: delete `context_status.json` from the
+  // pre-Phase-2 schema. Idempotent — silently no-op if absent. The new
+  // `context-pct.json` write above is the consolidated source of truth;
+  // FastChecker reads context-pct.json post Phase 2b.
+  try {
+    const legacyPath = join(stateDir, 'context_status.json');
+    if (existsSync(legacyPath)) unlinkSync(legacyPath);
+  } catch { /* non-fatal */ }
 
   // Best-effort event emission on severity escalation. logEvent has its own
   // error handling internally; wrap defensively to ensure the hook still
