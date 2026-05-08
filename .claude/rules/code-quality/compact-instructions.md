@@ -93,8 +93,22 @@ The context-discipline monitor computes severity from `current_loaded_tokens / c
 | soft | log heartbeat note | none recommended | none |
 | yellow | log heartbeat note recommending operator /compact | optional `/compact` at next phase boundary | none |
 | orange | log heartbeat note recommending operator /compact NOW | `/compact` NOW (or wait for red and let agent self-restart) | none |
-| red | `cortextos bus hard-restart --reason "context-red"` | `/compact` immediately OR allow agent self-restart | inject handoff prompt + force hard-restart at `ctx_handoff_threshold` (default 80% pct) |
+| red | `cortextos bus hard-restart --reason "context-red"` | `/compact` immediately OR allow agent self-restart | inject handoff prompt + force hard-restart at `ctx_handoff_threshold` pct override |
 
 The agent only has autonomous authority at red. Yellow + orange are monitoring-only for the agent; the operator decides whether to /compact.
+
+**Tuning `ctx_handoff_threshold` (per-agent config.json):**
+
+The legacy default is `80` (pct), which was set for 200k-context agents. Two failure modes if left unchanged across the fleet:
+
+- **200k models (Sonnet, Haiku, Opus default):** Layer 2 fires at 80%, BEFORE Layer 1a's red boundary at 85%. That's intentional — daemon-forced handoff (with handoff prompt + .force-fresh) is preferable to the agent's self-hard-restart at 85% because it preserves more context via the handoff doc. Default 80% is fine.
+- **1M-opus deployments:** Layer 2 default 80% is effectively never reached because Claude Code auto-compacts at ~42-45% (well below 80%) and the red severity boundary is at 50%. **Operators MUST override** `ctx_handoff_threshold` to 50 (match red) for 1M-opus agents, otherwise Layer 2 is decorative on those agents. The model-aware threshold table in `src/monitor/context-usage.ts` is the canonical reference.
+
+Recommended per-model values (pct):
+
+| Model context | `ctx_warning_threshold` | `ctx_handoff_threshold` |
+|---|---|---|
+| 200k (Sonnet/Haiku/Opus default) | 70 (legacy default; sits between yellow=65 and orange=75) | 80 (legacy default; sits between orange=75 and red=85) |
+| 1M (Opus 1M) | 42 (matches orange boundary) | 50 (matches red boundary) |
 
 Source: BL-2026-05-08-004 (engineer context discipline) — sb-personal-org-only spec; not part of the upstream cortextOS installer payload. Adopting orgs can re-derive the threshold tables from observed Claude Code auto-compact pressure points (~350-450k on 1M Opus, ~150-160k on 200k models). Thresholds tuneable after 1-2 weeks of observation.
