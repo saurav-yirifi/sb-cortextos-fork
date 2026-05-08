@@ -6,23 +6,56 @@ import { tmpdir } from 'os';
 /**
  * Unit tests for the context monitor logic in fast-checker.ts.
  * Tests the stateless helper functions and state machine in isolation.
+ *
+ * Schema migrated 2026-05-08T20:34Z (BL-2026-05-08-004 phase 2b): the
+ * fast-checker now reads `context-pct.json` (Phase 1 schema with severity)
+ * instead of `context_status.json` (legacy schema). The fixture helper
+ * writes the new schema; the tier-selection tests still drive pure-logic
+ * thresholds and remain unaffected by the file rename.
  */
 
-// --- Helpers to simulate context_status.json ---
+// --- Helpers to simulate context-pct.json (Phase 2 schema) ---
 
-function writeContextStatus(stateDir: string, pct: number | null, exceeds = false, ageMs = 0): void {
+function writeContextPct(stateDir: string, pct: number | null, exceeds = false, ageMs = 0, opts: { sessionId?: string; contextLimit?: number } = {}): void {
   mkdirSync(stateDir, { recursive: true });
-  const written_at = new Date(Date.now() - ageMs).toISOString();
+  const updated_at = new Date(Date.now() - ageMs).toISOString();
+  const ctxLimit = opts.contextLimit ?? 200_000;
+  const safePct = pct ?? 0;
+  // Map legacy "exceeds_200k_tokens" signal to severity (1M-context agents
+  // exceed 200k well before triggering — but legacy fixture semantics need
+  // representable severity for the tier selector to stay correct).
+  let severity: string = 'green';
+  if (safePct >= 85) severity = 'red';
+  else if (safePct >= 75) severity = 'orange';
+  else if (safePct >= 65) severity = 'yellow';
+  else if (safePct >= 50) severity = 'soft';
   writeFileSync(
-    join(stateDir, 'context_status.json'),
-    JSON.stringify({ used_percentage: pct, exceeds_200k_tokens: exceeds, written_at }),
+    join(stateDir, 'context-pct.json'),
+    JSON.stringify({
+      agent: 'test-agent',
+      session_id: opts.sessionId ?? '',
+      transcript_path: 'statusline://current-session',
+      model: 'claude-opus-4-7',
+      context_limit: ctxLimit,
+      current_loaded_tokens: Math.round((safePct / 100) * ctxLimit),
+      pct: safePct,
+      severity,
+      next_action_threshold_pct: null,
+      updated_at,
+      // Retain legacy field so the FastChecker's exceeds_200k_tokens fallback
+      // path is exercised by fixtures that pass `exceeds=true` with null pct.
+      exceeds_200k_tokens: exceeds,
+    }),
     'utf-8',
   );
 }
 
+// Backwards-compat alias for any test reading the helper by its old name.
+const writeContextStatus = writeContextPct;
+
 // --- Staleness detection ---
 
-describe('context_status.json staleness detection', () => {
+describe('context-pct.json staleness detection (BL-004 phase 2 schema)', () => {
   let stateDir: string;
 
   beforeEach(() => {
@@ -31,33 +64,40 @@ describe('context_status.json staleness detection', () => {
   });
 
   afterEach(() => {
-    try { unlinkSync(join(stateDir, 'context_status.json')); } catch { /* ignore */ }
+    try { unlinkSync(join(stateDir, 'context-pct.json')); } catch { /* ignore */ }
   });
 
-  it('fresh file (0ms) passes staleness check', () => {
-    writeContextStatus(stateDir, 72.4, false, 0);
-    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context_status.json'), 'utf-8'));
-    const age = Date.now() - new Date(raw.written_at).getTime();
+  it('fresh file (0ms) passes staleness check via updated_at', () => {
+    writeContextPct(stateDir, 72.4, false, 0);
+    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context-pct.json'), 'utf-8'));
+    const age = Date.now() - new Date(raw.updated_at).getTime();
     expect(age).toBeLessThan(10 * 60_000);
   });
 
-  it('file older than 10min is considered stale', () => {
-    writeContextStatus(stateDir, 72.4, false, 11 * 60_000);
-    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context_status.json'), 'utf-8'));
-    const age = Date.now() - new Date(raw.written_at).getTime();
+  it('file older than 10min is considered stale (updated_at)', () => {
+    writeContextPct(stateDir, 72.4, false, 11 * 60_000);
+    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context-pct.json'), 'utf-8'));
+    const age = Date.now() - new Date(raw.updated_at).getTime();
     expect(age).toBeGreaterThan(10 * 60_000);
   });
 
-  it('null used_percentage is handled gracefully', () => {
-    writeContextStatus(stateDir, null, false, 0);
-    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context_status.json'), 'utf-8'));
-    expect(raw.used_percentage).toBeNull();
+  it('null pct is handled gracefully (helper writes 0 with green severity)', () => {
+    writeContextPct(stateDir, null, false, 0);
+    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context-pct.json'), 'utf-8'));
+    expect(raw.pct).toBe(0);
+    expect(raw.severity).toBe('green');
   });
 
-  it('exceeds_200k_tokens=true with null pct is a valid signal', () => {
-    writeContextStatus(stateDir, null, true, 0);
-    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context_status.json'), 'utf-8'));
+  it('exceeds_200k_tokens legacy signal is preserved in fixture for backwards-compat', () => {
+    writeContextPct(stateDir, null, true, 0);
+    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context-pct.json'), 'utf-8'));
     expect(raw.exceeds_200k_tokens).toBe(true);
+  });
+
+  it('schema includes severity field that downstream Layer-1 (HEARTBEAT.md) reads', () => {
+    writeContextPct(stateDir, 87, false, 0);
+    const raw = JSON.parse(require('fs').readFileSync(join(stateDir, 'context-pct.json'), 'utf-8'));
+    expect(raw.severity).toBe('red');
   });
 });
 

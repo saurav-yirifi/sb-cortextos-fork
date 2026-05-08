@@ -171,9 +171,25 @@ export interface AgentConfig {
     never_ask: string[];
   };
   ecosystem?: EcosystemConfig;
-  /** Context window % at which to warn agent + user. Default: 70. Absent = observe-only. */
+  /**
+   * Context window % at which the daemon-side FastChecker injects a brief
+   * "[CONTEXT] Window at N%" message into the agent PTY. Default: 70.
+   * Absent = observe-only (FastChecker reads context-pct.json but takes no
+   * action). Per BL-2026-05-08-004 phase 2: this threshold is a pct override
+   * on Phase 1's model-aware severity tables. For 1M-opus agents, set this
+   * to ~42 to align with the model-aware "orange" boundary; for 200k models
+   * the legacy default of 70 already aligns with the model-aware "yellow"
+   * boundary.
+   */
   ctx_warning_threshold?: number;
-  /** Context window % at which to inject handoff prompt and hard-restart. Default: 80. */
+  /**
+   * Context window % at which the daemon-side FastChecker injects a handoff
+   * prompt and force-restarts the agent (Layer 2 of BL-004). Default: 80.
+   * For 1M-opus agents, set to ~50 to align with the model-aware "red"
+   * boundary; for 200k models the legacy default of 80 sits between
+   * "orange" (75) and "red" (85). Layer 1 (agent-cooperative /compact at
+   * safe boundaries) is handled separately in HEARTBEAT.md Step 3a.
+   */
   ctx_handoff_threshold?: number;
   /**
    * Agent runtime. Defaults to 'claude-code' when absent.
