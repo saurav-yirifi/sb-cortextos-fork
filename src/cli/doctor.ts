@@ -286,6 +286,91 @@ export const doctorCommand = new Command('doctor')
       fix: !existsSync(catalogPath) ? 'Run: cortextos bus check-upstream --apply to fetch the latest catalog' : undefined,
     });
 
+    // BL-003 phase 1: per-org Claude-profile registry
+    //
+    // For each org with a profiles.json: parse it, confirm the default
+    // resolves to a real profile + each profile's config_dir exists on
+    // disk + each agent's claude_profile (if set) names a known
+    // profile. Warn-level — missing or malformed registry shouldn't
+    // block daemon boot (the spawn path silently degrades to no env
+    // override) but the operator should know.
+    const orgsRoot = join(frameworkRoot, 'orgs');
+    if (existsSync(orgsRoot)) {
+      try {
+        for (const org of readdirSync(orgsRoot)) {
+          const profilesPath = join(orgsRoot, org, 'profiles.json');
+          if (!existsSync(profilesPath)) continue;
+
+          let registry: { default_profile?: unknown; profiles?: unknown };
+          try {
+            registry = JSON.parse(readFileSync(profilesPath, 'utf-8'));
+          } catch (err) {
+            checks.push({
+              name: `Profiles registry (${org})`,
+              status: 'warn',
+              message: `Malformed JSON: ${(err as Error).message}`,
+              fix: `Validate orgs/${org}/profiles.json — spawn path silently falls back to no profile override until fixed`,
+            });
+            continue;
+          }
+
+          const def = registry.default_profile;
+          const profiles = registry.profiles;
+          if (typeof def !== 'string' || !def || !profiles || typeof profiles !== 'object') {
+            checks.push({
+              name: `Profiles registry (${org})`,
+              status: 'warn',
+              message: 'Schema invalid — needs default_profile + profiles map',
+              fix: `See BL-2026-05-08-003 for the registry shape`,
+            });
+            continue;
+          }
+
+          const profileMap = profiles as Record<string, { config_dir?: unknown }>;
+          const danglingDefault = !(def in profileMap);
+          const missingDirs: string[] = [];
+          for (const [pname, p] of Object.entries(profileMap)) {
+            const dir = p?.config_dir;
+            if (typeof dir !== 'string' || !dir || !existsSync(dir)) {
+              missingDirs.push(`${pname}→${dir ?? '(unset)'}`);
+            }
+          }
+
+          // Walk agents, collect claude_profile references
+          const dangling: string[] = danglingDefault ? [def] : [];
+          const agentsDir = join(orgsRoot, org, 'agents');
+          if (existsSync(agentsDir)) {
+            for (const agentName of readdirSync(agentsDir)) {
+              const cfgPath = join(agentsDir, agentName, 'config.json');
+              if (!existsSync(cfgPath)) continue;
+              try {
+                const cfg = JSON.parse(readFileSync(cfgPath, 'utf-8')) as { claude_profile?: unknown };
+                const ref = cfg.claude_profile;
+                if (typeof ref === 'string' && ref && !(ref in profileMap) && !dangling.includes(ref)) {
+                  dangling.push(`${agentName}→${ref}`);
+                }
+              } catch { /* skip malformed config */ }
+            }
+          }
+
+          const issues: string[] = [];
+          if (dangling.length) issues.push(`dangling refs: ${dangling.join(', ')}`);
+          if (missingDirs.length) issues.push(`config_dir missing on disk: ${missingDirs.join(', ')}`);
+
+          checks.push({
+            name: `Profiles registry (${org})`,
+            status: issues.length ? 'warn' : 'pass',
+            message: issues.length
+              ? issues.join('; ')
+              : `${Object.keys(profileMap).length} profile(s); default=${def}`,
+            fix: issues.length
+              ? `Edit orgs/${org}/profiles.json or the offending agent config.json`
+              : undefined,
+          });
+        }
+      } catch { /* ignore scan errors */ }
+    }
+
     // Check GEMINI_API_KEY for Knowledge Base (semantic search / RAG)
     const orgsDir = join(frameworkRoot, 'orgs');
     let geminiConfigured = false;
