@@ -102,11 +102,22 @@ Photos include a `local_file:` path. Callbacks include `callback_data:` and `mes
 
 ```
 === AGENT MESSAGE from <agent> [msg_id: <id>] ===
+[FRESH-START: ...]                  ← optional dispatch hint, present only when sender set --fresh-start
 <text>
 Reply using: cortextos bus send-message <agent> normal '<reply>' <msg_id>
 ```
 
 Always include `msg_id` as reply_to (auto-ACKs the original). Un-ACK'd messages redeliver after 5 min. For no-reply messages: `cortextos bus ack-inbox <msg_id>`
+
+### Fresh-start dispatch hint (BL-2026-05-08-004 Phase 3)
+
+When the sender uses `cortextos bus send-message --fresh-start`, the formatted message includes a `[FRESH-START: ...]` annotation line BETWEEN the `===` header and the body fence. The annotation tells you whether to hard-restart before processing the dispatch:
+
+- `[FRESH-START: sender requests hard-restart before processing — see CLAUDE.md "On dispatch receipt"]` — the sender (typically boss) is signalling that this dispatch is unrelated to your current work. Default action: **commit any in-flight work, then `cortextos bus hard-restart --reason "fresh-start for <new-task>"` BEFORE replying or starting the new dispatch**. Conversation history is dropped; durable memory (MEMORY.md, daily memory, git log) is preserved and is your recovery layer.
+- `[FRESH-START: explicit override — sender says do NOT hard-restart even if task looks unrelated]` — the sender has already decided no restart needed. Treat as a normal dispatch even if the task surface looks unrelated to current work.
+- No annotation present → no hint; treat as a normal dispatch.
+
+The full "On dispatch receipt" decision rule (self-detection heuristic + cooldown) lands in Phase 3b as the canonical reference; this stub is the minimum needed for the annotation to be safe to ship today.
 
 ---
 

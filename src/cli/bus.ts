@@ -73,8 +73,8 @@ busCommand
   .argument('<text>', 'Message text')
   .argument('[reply-to]', 'Reply to message ID (optional positional form)')
   .option('--reply-to <id>', 'Reply to message ID')
-  .option('--fresh-start', 'Dispatch hint: ask receiver to hard-restart before processing (BL-004 Phase 3 — unrelated-task transition)')
-  .option('--no-fresh-start', 'Dispatch hint: explicitly tell receiver NOT to hard-restart even if heuristic would (BL-004 Phase 3 — explicit override)')
+  .option('--fresh-start', 'Dispatch hint: ask receiver to hard-restart before processing this message — typically because the new task is unrelated to the receiver\'s current work (BL-004 Phase 3)')
+  .option('--no-fresh-start', 'Dispatch hint: explicit override telling receiver NOT to hard-restart for this message — receiver stays in its current session regardless of task type (BL-004 Phase 3)')
   .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string; freshStart?: boolean }) => {
     // Accept reply-to as either positional arg or --reply-to flag (P2 fix #9)
     const effectiveReplyTo = opts.replyTo ?? replyToArg;

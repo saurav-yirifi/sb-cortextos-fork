@@ -95,27 +95,35 @@ describe('Message Bus', () => {
     });
 
     // BL-2026-05-08-004 Phase 3 — fresh_start dispatch hint
+    // Lookup by content text instead of positional [0] so future tests in this
+    // describe block writing to the same inbox dir don't shift assertions.
+    function readMessageByText(inboxDir: string, expectedText: string): any {
+      const files = readdirSync(inboxDir).filter(f => f.endsWith('.json'));
+      for (const f of files) {
+        const content = JSON.parse(readFileSync(join(inboxDir, f), 'utf-8'));
+        if (content.text === expectedText) return content;
+      }
+      throw new Error(`No message found in ${inboxDir} with text="${expectedText}"`);
+    }
+
     it('omits fresh_start when not provided (backwards compat)', () => {
-      sendMessage(senderPaths, 'a', 'b', 'normal', 'no hint');
-      const inbox = join(testDir, 'inbox', 'b');
-      const file = readdirSync(inbox).filter(f => f.endsWith('.json'))[0];
-      const content = JSON.parse(readFileSync(join(inbox, file), 'utf-8'));
+      const TEXT = 'no hint';
+      sendMessage(senderPaths, 'a', 'b', 'normal', TEXT);
+      const content = readMessageByText(join(testDir, 'inbox', 'b'), TEXT);
       expect(content).not.toHaveProperty('fresh_start');
     });
 
     it('persists fresh_start=true when provided', () => {
-      sendMessage(senderPaths, 'a', 'b', 'normal', 'unrelated dispatch', undefined, true);
-      const inbox = join(testDir, 'inbox', 'b');
-      const file = readdirSync(inbox).filter(f => f.endsWith('.json'))[0];
-      const content = JSON.parse(readFileSync(join(inbox, file), 'utf-8'));
+      const TEXT = 'unrelated dispatch';
+      sendMessage(senderPaths, 'a', 'b', 'normal', TEXT, undefined, true);
+      const content = readMessageByText(join(testDir, 'inbox', 'b'), TEXT);
       expect(content.fresh_start).toBe(true);
     });
 
     it('persists fresh_start=false (explicit override) when provided', () => {
-      sendMessage(senderPaths, 'a', 'b', 'normal', 'related dispatch', undefined, false);
-      const inbox = join(testDir, 'inbox', 'b');
-      const file = readdirSync(inbox).filter(f => f.endsWith('.json'))[0];
-      const content = JSON.parse(readFileSync(join(inbox, file), 'utf-8'));
+      const TEXT = 'related dispatch';
+      sendMessage(senderPaths, 'a', 'b', 'normal', TEXT, undefined, false);
+      const content = readMessageByText(join(testDir, 'inbox', 'b'), TEXT);
       expect(content.fresh_start).toBe(false);
     });
 
