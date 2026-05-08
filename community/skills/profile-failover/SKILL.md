@@ -33,12 +33,30 @@ Anthropic API quota error pattern. Event metadata:
 }
 ```
 
-Find recent events:
-```bash
-cortextos bus list-events --event profile_quota_exhausted --since 1h
+cortextOS does not (yet) expose a `list-events` bus subcommand.
+Read the analytics events tree directly. Each agent has a per-day
+JSONL file at:
+
+```
+~/.cortextos/$CTX_INSTANCE_ID/orgs/$CTX_ORG/analytics/events/<agent>/<YYYY-MM-DD>.jsonl
 ```
 
-Or monitor passively — the daemon will deliver the event into your
+Recent quota events across all agents (last hour):
+
+```bash
+EVENTS_ROOT=~/.cortextos/$CTX_INSTANCE_ID/orgs/$CTX_ORG/analytics/events
+TODAY=$(date -u +%F)
+CUTOFF=$(date -u -v-1H +%FT%TZ 2>/dev/null || date -u -d '1 hour ago' +%FT%TZ)
+for f in "$EVENTS_ROOT"/*/"$TODAY".jsonl; do
+  [ -f "$f" ] || continue
+  jq -c --arg cutoff "$CUTOFF" \
+    'select(.event == "profile_quota_exhausted" and .timestamp > $cutoff)' \
+    "$f"
+done
+```
+
+The event row's `id` field is what you pass as `--trigger` below.
+Or monitor passively — the daemon delivers the event into your
 session via inbox if it crosses a severity threshold.
 
 ---

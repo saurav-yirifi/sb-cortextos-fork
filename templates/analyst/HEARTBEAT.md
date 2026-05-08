@@ -141,14 +141,31 @@ edit `boss/config.json` and issue a soft-restart on boss's behalf
 (boss can't run the failover skill if its own session has died).
 
 ```bash
-# Is boss stale?
-BOSS_AGE_MINUTES=$(cortextos bus read-heartbeat $CTX_ORCHESTRATOR_AGENT --age-minutes 2>/dev/null || echo 999)
+# Is boss stale? read-all-heartbeats is the only available CLI;
+# filter to boss in jq and compare last_heartbeat to now.
+NOW_EPOCH=$(date -u +%s)
+BOSS_HB=$(cortextos bus read-all-heartbeats --format json \
+  | jq -r --arg agent "$CTX_ORCHESTRATOR_AGENT" \
+      '.[] | select(.agent == $agent) | .last_heartbeat // empty')
+if [ -z "$BOSS_HB" ]; then
+  BOSS_AGE_MINUTES=999  # no heartbeat record at all → treat as stale
+else
+  BOSS_AGE_MINUTES=$(( (NOW_EPOCH - $(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$BOSS_HB" +%s 2>/dev/null || date -u -d "$BOSS_HB" +%s)) / 60 ))
+fi
 
-# Did boss quota-exhaust in the last 5 minutes?
-RECENT_EXHAUST=$(cortextos bus list-events --event profile_quota_exhausted --agent $CTX_ORCHESTRATOR_AGENT --since 5m --json 2>/dev/null | jq 'length')
+# Did boss quota-exhaust in the last 5 minutes? cortextOS doesn't
+# expose a list-events CLI; read the analytics JSONL directly.
+EVENTS_FILE=~/.cortextos/$CTX_INSTANCE_ID/orgs/$CTX_ORG/analytics/events/$CTX_ORCHESTRATOR_AGENT/$(date -u +%F).jsonl
+CUTOFF=$(date -u -v-5M +%FT%TZ 2>/dev/null || date -u -d '5 min ago' +%FT%TZ)
+RECENT_EXHAUST=0
+if [ -f "$EVENTS_FILE" ]; then
+  RECENT_EXHAUST=$(jq -c --arg cutoff "$CUTOFF" \
+    'select(.event == "profile_quota_exhausted" and .timestamp > $cutoff)' \
+    "$EVENTS_FILE" 2>/dev/null | wc -l | tr -d ' ')
+fi
 ```
 
-If boss is stale AND `$RECENT_EXHAUST > 0`:
+If `BOSS_AGE_MINUTES > 5` AND `$RECENT_EXHAUST > 0`:
 
 ```bash
 # Use the same atomic primitive boss would have used on itself

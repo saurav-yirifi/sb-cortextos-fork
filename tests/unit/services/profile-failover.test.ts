@@ -40,11 +40,24 @@ function writeAgentConfig(contents: object): void {
   writeFileSync(join(agentDir(), 'config.json'), JSON.stringify(contents), 'utf-8');
 }
 
-function writeBusEvent(when: Date, event: string, metadata: object): void {
-  const eventsDir = join(tmpRoot, '.bus', 'events');
-  mkdirSync(eventsDir, { recursive: true });
+function analyticsEventsRoot(): string {
+  // Mirror the production layout (~/.cortextos/<instance>/orgs/<org>/analytics/events)
+  // but rooted under the test tmpdir. Passed to runFailover via DI so
+  // the test never reaches into ~/.cortextos.
+  return join(tmpRoot, 'analytics-events');
+}
+
+function writeBusEvent(
+  when: Date,
+  event: string,
+  metadata: object,
+  agent: string = 'engineer',
+): void {
+  // Real path is per-agent: <root>/<agent>/<YYYY-MM-DD>.jsonl
   const day = when.toISOString().slice(0, 10);
-  const file = join(eventsDir, `${day}.jsonl`);
+  const dir = join(analyticsEventsRoot(), agent);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${day}.jsonl`);
   const row = JSON.stringify({
     id: 'evt_test',
     event,
@@ -184,6 +197,47 @@ describe('runFailover happy path', () => {
 
     expect(existsSync(join(agentDir(), 'config.json.tmp'))).toBe(false);
   });
+
+  it('cleans up the .tmp file when the write path fails', () => {
+    // Drive a real failure: make the agent directory non-writable, so
+    // writeFileSync(tmpPath) fails. The catch block must unlinkSync
+    // the tmp regardless of whether it landed (the unlinkSync's own
+    // try/catch absorbs the ENOENT for us). Vitest can't redefine
+    // node's readonly fs exports via vi.spyOn (the descriptor isn't
+    // configurable), so this exercise uses a real EACCES path.
+    //
+    // Skip on Windows where chmod semantics differ.
+    if (process.platform === 'win32') return;
+
+    const fs = require('fs');
+    writeProfilesJson({
+      default_profile: 'personal',
+      profiles: { personal: { config_dir: '/p' }, work: { config_dir: '/w' } },
+    });
+    writeAgentConfig({ agent_name: AGENT, fallback_profile: 'work' });
+    fs.chmodSync(agentDir(), 0o555); // read+execute, no write
+
+    try {
+      expect(() =>
+        runFailover({
+          projectRoot: tmpRoot,
+          org: ORG,
+          agentName: AGENT,
+          triggerEventId: 'e1',
+          emit: emitRecorder().fn,
+          sendRestart: restartRecorder().fn,
+        }),
+      ).toThrowError(expect.objectContaining({ reason: 'config_write_failed' }));
+
+      // .tmp cleaned up (the catch block's unlinkSync attempt is
+      // best-effort; on a permission-denied parent it can fail too,
+      // but the file shouldn't have been written successfully in the
+      // first place — either way no leftover artifact remains).
+      expect(existsSync(join(agentDir(), 'config.json.tmp'))).toBe(false);
+    } finally {
+      fs.chmodSync(agentDir(), 0o755); // restore for afterEach rmSync
+    }
+  });
 });
 
 describe('runFailover guard rejections', () => {
@@ -311,6 +365,37 @@ describe('runFailover cascade-prevention via bus log', () => {
         agentName: AGENT,
         triggerEventId: 'e1',
         now,
+        analyticsEventsRoot: analyticsEventsRoot(),
+        emit: emitRecorder().fn,
+        sendRestart: restartRecorder().fn,
+      }),
+    ).toThrowError(expect.objectContaining({ reason: 'cascade_window_active' }));
+  });
+
+  it('detects exhaustion regardless of which agent emitted it (per-profile, not per-agent)', () => {
+    // The bus event is per-AGENT (whichever agent's hook fired) but
+    // a quota-exhaust on profile X means the profile is unhealthy —
+    // failing into it from a DIFFERENT agent should still be
+    // blocked.
+    writeProfilesJson({
+      default_profile: 'personal',
+      profiles: { personal: { config_dir: '/p' }, work: { config_dir: '/w' } },
+    });
+    writeAgentConfig({ agent_name: AGENT, fallback_profile: 'work' });
+
+    const now = new Date('2026-05-08T20:30:00Z');
+    const past = new Date(now.getTime() - 10 * 60 * 1000);
+    // Event was emitted by 'devops', not the agent we're failing over
+    writeBusEvent(past, 'profile_quota_exhausted', { profile: 'work' }, 'devops');
+
+    expect(() =>
+      runFailover({
+        projectRoot: tmpRoot,
+        org: ORG,
+        agentName: AGENT,
+        triggerEventId: 'e1',
+        now,
+        analyticsEventsRoot: analyticsEventsRoot(),
         emit: emitRecorder().fn,
         sendRestart: restartRecorder().fn,
       }),
@@ -337,6 +422,7 @@ describe('runFailover cascade-prevention via bus log', () => {
       agentName: AGENT,
       triggerEventId: 'e1',
       now,
+      analyticsEventsRoot: analyticsEventsRoot(),
       emit: emit.fn,
       sendRestart: restart.fn,
     });
@@ -361,15 +447,16 @@ describe('runFailover cascade-prevention via bus log', () => {
       org: ORG,
       agentName: AGENT,
       triggerEventId: 'e1',
-      now,
+      now: new Date('2026-05-08T20:30:00Z'),
+      analyticsEventsRoot: analyticsEventsRoot(),
       emit: emitRecorder().fn,
       sendRestart: restartRecorder().fn,
     });
     expect(result.to_profile).toBe('work');
   });
 
-  it('returns false (not a cascade) when no bus log directory exists', () => {
-    // A fresh deployment has no .bus/events/ yet — the failover
+  it('returns false (not a cascade) when no events tree exists', () => {
+    // A fresh deployment has no analytics/events/ yet — the failover
     // should proceed, not fail-shut.
     writeProfilesJson({
       default_profile: 'personal',
@@ -382,6 +469,7 @@ describe('runFailover cascade-prevention via bus log', () => {
       agentName: AGENT,
       triggerEventId: 'e1',
       now: new Date('2026-05-08T20:30:00Z'),
+      analyticsEventsRoot: analyticsEventsRoot(),
       emit: emitRecorder().fn,
       sendRestart: restartRecorder().fn,
     });

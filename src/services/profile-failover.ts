@@ -25,7 +25,8 @@
  * inspecting the message string.
  */
 
-import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
+import { homedir } from 'os';
 import { join } from 'path';
 import { execFile } from 'child_process';
 
@@ -61,6 +62,8 @@ export interface FailoverOptions {
   /** Bus-event id of the triggering `profile_quota_exhausted` event,
    *  threaded into the audit row for provenance. */
   triggerEventId: string;
+  /** cortextOS instance id — locates the analytics events tree. */
+  instanceId?: string;
   /** Override the wall-clock — tests inject a fixed instant. */
   now?: Date;
   /** Override the bus-emit shell-out — tests inject a recorder. */
@@ -69,6 +72,10 @@ export interface FailoverOptions {
   recentExhaustionFor?: (profile: string, agentDir: string) => boolean;
   /** Override the soft-restart dispatcher — tests inject a recorder. */
   sendRestart?: (agent: string, reason: string) => void;
+  /** Override the analytics events root — tests point at tmp; production
+   *  resolves to `~/.cortextos/<instanceId>/orgs/<org>/analytics/events`.
+   *  See `src/utils/paths.ts:46` for the canonical layout. */
+  analyticsEventsRoot?: string;
 }
 
 export interface FailoverResult {
@@ -140,7 +147,11 @@ export function runFailover(opts: FailoverOptions): FailoverResult {
   // through every profile instead of stopping for human triage.
   const recentlyExhausted = opts.recentExhaustionFor
     ? opts.recentExhaustionFor(fallback, agentDir)
-    : recentExhaustionForFromBus(fallback, opts.projectRoot, now);
+    : recentExhaustionForFromBus(
+        fallback,
+        opts.analyticsEventsRoot ?? defaultAnalyticsEventsRoot(opts.org, opts.instanceId),
+        now,
+      );
   if (recentlyExhausted) {
     throw new FailoverError(
       'cascade_window_active',
@@ -157,11 +168,14 @@ export function runFailover(opts: FailoverOptions): FailoverResult {
   // Atomic write: temp-then-rename so a crash mid-flight leaves the
   // existing config.json intact (rename(2) is atomic on POSIX same-fs).
   // Same temp-pattern as `cron-management/state-write` in the daemon.
+  // On rename failure, the .tmp file is cleaned up so a partial-write
+  // doesn't leave stale state on disk for the next run to inherit.
   const tmpPath = configPath + '.tmp';
   try {
     writeFileSync(tmpPath, JSON.stringify(updated, null, 2) + '\n', 'utf-8');
     renameSync(tmpPath, configPath);
   } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* tmp may not have been created — best-effort */ }
     throw new FailoverError(
       'config_write_failed',
       `Failed to update ${configPath}: ${(err as Error).message}`,
@@ -198,11 +212,18 @@ export function runFailover(opts: FailoverOptions): FailoverResult {
 }
 
 /**
- * Default cascade-prevention check: scan the bus event log for any
- * `profile_quota_exhausted` event whose metadata names the target
- * profile and whose timestamp is within CASCADE_WINDOW_MS of `now`.
+ * Default cascade-prevention check: scan the analytics event log for
+ * any `profile_quota_exhausted` event whose metadata names the
+ * target profile and whose timestamp is within CASCADE_WINDOW_MS of
+ * `now`. Walks every agent's per-day file under `eventsRoot` —
+ * the event is per-AGENT but a quota-exhaust on profile X means the
+ * profile itself is unhealthy regardless of which agent surfaced it.
  *
- * Best-effort: missing bus log returns false (no cascade observed).
+ * `eventsRoot` resolves to
+ *   `~/.cortextos/<instance>/orgs/<org>/analytics/events`
+ * via `defaultAnalyticsEventsRoot` (matching `src/utils/paths.ts:46`).
+ *
+ * Best-effort: missing tree returns false (no cascade observed).
  * Boss can still proceed with the failover; the worst case is one
  * hop into a profile that's about to also fail, which logs another
  * `profile_quota_exhausted` event and leaves Saurav with a manual
@@ -211,38 +232,56 @@ export function runFailover(opts: FailoverOptions): FailoverResult {
  */
 function recentExhaustionForFromBus(
   profile: string,
-  projectRoot: string,
+  eventsRoot: string,
   now: Date,
 ): boolean {
-  const eventsRoot = join(projectRoot, '.bus', 'events');
   if (!existsSync(eventsRoot)) return false;
   const today = now.toISOString().slice(0, 10);
   const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
   const cutoff = now.getTime() - CASCADE_WINDOW_MS;
-  for (const day of [today, yesterday]) {
-    const file = join(eventsRoot, `${day}.jsonl`);
-    if (!existsSync(file)) continue;
-    let lines: string[];
-    try {
-      // Cheap: 30 min of events is small. If the bus log grows
-      // unboundedly, switch to a tail-only read.
-      lines = readFileSync(file, 'utf-8').split('\n');
-    } catch {
-      continue;
-    }
-    for (const line of lines) {
-      if (!line) continue;
-      let row: { event?: string; metadata?: { profile?: string }; timestamp?: string };
+  let agents: string[];
+  try {
+    agents = readdirSync(eventsRoot);
+  } catch {
+    return false;
+  }
+  for (const agent of agents) {
+    for (const day of [today, yesterday]) {
+      const file = join(eventsRoot, agent, `${day}.jsonl`);
+      if (!existsSync(file)) continue;
+      let lines: string[];
       try {
-        row = JSON.parse(line);
-      } catch { continue; }
-      if (row.event !== 'profile_quota_exhausted') continue;
-      if (row.metadata?.profile !== profile) continue;
-      if (!row.timestamp) continue;
-      if (new Date(row.timestamp).getTime() >= cutoff) return true;
+        // Cheap: 30 min of events is small. If a single agent's daily
+        // log grows past a few MB, switch to a tail-only read.
+        lines = readFileSync(file, 'utf-8').split('\n');
+      } catch {
+        continue;
+      }
+      for (const line of lines) {
+        if (!line) continue;
+        let row: { event?: string; metadata?: { profile?: string }; timestamp?: string };
+        try {
+          row = JSON.parse(line);
+        } catch { continue; }
+        if (row.event !== 'profile_quota_exhausted') continue;
+        if (row.metadata?.profile !== profile) continue;
+        if (!row.timestamp) continue;
+        if (new Date(row.timestamp).getTime() >= cutoff) return true;
+      }
     }
   }
   return false;
+}
+
+/**
+ * Resolve the analytics events root the same way `src/utils/paths.ts:46`
+ * does, but without dragging in `resolvePaths`'s instance-id validation
+ * and per-agent slot — the failover primitive walks ALL agents' events
+ * looking for `profile_quota_exhausted` rows, so it needs the org-level
+ * dir, not an agent-scoped one.
+ */
+function defaultAnalyticsEventsRoot(org: string, instanceId?: string): string {
+  return join(homedir(), '.cortextos', instanceId || 'default', 'orgs', org, 'analytics', 'events');
 }
 
 function defaultEmit(eventName: string, severity: string, meta: Record<string, unknown>): void {
