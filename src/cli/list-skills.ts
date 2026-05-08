@@ -82,11 +82,25 @@ export const listSkillsCommand = new Command('list-skills')
     // Find framework template dir
     const templateRoot = findTemplateRoot();
 
-    // Scan in priority order (framework → template → agent)
+    // Scan in priority order (framework → community → template → agent).
+    // Later layers override earlier ones — agent always wins, then template, then community,
+    // then framework-default.
     // Framework-level skills
     if (templateRoot) {
       const frameworkSkills = join(templateRoot, '..', 'skills');
       for (const skill of scanSkillsDir(frameworkSkills, 'framework')) {
+        skillMap.set(skill.name, skill);
+      }
+    }
+
+    // Community skills (BL-2026-05-08-004 Phase 3 — `community/skills/<name>/SKILL.md` is the
+    // documented location for community-shared skills like `context-aware-dispatch` and
+    // `profile-failover`. Without this scan, those skills exist on disk but never appear
+    // in `cortextos bus list-skills` output, leaving them undiscoverable through the
+    // documented session-start step.)
+    if (templateRoot) {
+      const communitySkills = join(templateRoot, '..', 'community', 'skills');
+      for (const skill of scanSkillsDir(communitySkills, 'community')) {
         skillMap.set(skill.name, skill);
       }
     }

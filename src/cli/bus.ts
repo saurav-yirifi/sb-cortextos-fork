@@ -1557,9 +1557,14 @@ busCommand
       return map;
     }
 
-    // Merge in priority order: framework < template < agent (agent wins)
+    // Merge in priority order: framework < community < template < agent (agent wins).
+    // BL-2026-05-08-004 Phase 3: community/skills/ added so community-shared skills like
+    // `context-aware-dispatch` and `profile-failover` are discoverable through this CLI
+    // (their canonical location is `<frameworkRoot>/community/skills/<name>/SKILL.md`).
+    // Without this scan they exist on disk but never surface in `cortextos bus list-skills`.
     const merged = new Map<string, SkillInfo>();
     for (const [k, v] of scanSkillsDir(join(frameworkRoot, '.claude', 'skills'), 'framework')) merged.set(k, v);
+    for (const [k, v] of scanSkillsDir(join(frameworkRoot, 'community', 'skills'), 'community')) merged.set(k, v);
     if (template) {
       for (const [k, v] of scanSkillsDir(join(frameworkRoot, 'templates', template, '.claude', 'skills'), `template:${template}`)) merged.set(k, v);
     }
