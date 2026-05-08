@@ -90,10 +90,10 @@ cat "$CTX_ROOT/state/$CTX_AGENT_NAME/context-pct.json" | jq '{pct, severity, cur
 Severity → action (full reference: `.claude/rules/code-quality/compact-instructions.md`):
 
 - `green` — no action
-- `soft` — log a heartbeat note that context is elevated; no `/compact` yet
-- `yellow` — schedule `/compact` at the **next** phase boundary (commit first, then compact)
-- `orange` — `/compact` **now** at a safe boundary; if no boundary reachable, run the *Mid-task emergency* template
-- `red` — `cortextos bus hard-restart --reason "context-red"`; `/compact` at this point is too late
+- `soft` — log a heartbeat note that context is elevated; no autonomous action
+- `yellow` — log a heartbeat note recommending **operator** `/compact` at the next phase boundary; agent has no autonomous action (`/compact` is a Claude Code slash command typed by the operator — agents cannot invoke it from a tool call; see `code-quality/agent-side-compact-not-invokable.md`)
+- `orange` — log a heartbeat note recommending **operator** `/compact` NOW; agent has no autonomous action. If the operator is unavailable and the situation is unsafe, the only agent-self fallback is `cortextos bus hard-restart` (preserves durable memory; loses live conversation)
+- `red` — `cortextos bus hard-restart --reason "context-red"` (Layer 1a agent-self primitive — `/compact` is too late at this severity)
 
 If `context-update` exits non-zero (no transcript found): treat as unknown, skip threshold action this cycle, log warning.
 
