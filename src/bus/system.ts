@@ -74,8 +74,19 @@ export function selfRestart(paths: BusPaths, agentName: string, reason?: string)
  * Plan a hard restart (fresh session, no --continue).
  * Creates .force-fresh marker file; daemon checks this on next restart.
  * Mirrors bash bus/hard-restart.sh.
+ *
+ * BL-2026-05-08-004 Phase 3: when `freshStart=true`, also writes
+ * `.last-fresh-restart-at` so the cooldown check can prevent thrash
+ * on fast back-to-back unrelated dispatches. Context-overflow restarts
+ * (FastChecker Tier-2/3) MUST NOT pass freshStart=true — those are not
+ * dispatch-driven and shouldn't consume the cooldown window.
  */
-export function hardRestart(paths: BusPaths, agentName: string, reason?: string): void {
+export function hardRestart(
+  paths: BusPaths,
+  agentName: string,
+  reason?: string,
+  freshStart?: boolean,
+): void {
   const resolvedReason = reason || 'no reason specified';
 
   // Create force-fresh marker (agent-process.ts checks this on restart)
@@ -88,8 +99,87 @@ export function hardRestart(paths: BusPaths, agentName: string, reason?: string)
   // Append to restarts.log
   ensureDir(paths.logDir);
   const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-  const logLine = `[${timestamp}] HARD-RESTART: ${resolvedReason}\n`;
+  const restartTag = freshStart ? 'HARD-RESTART (fresh-start)' : 'HARD-RESTART';
+  const logLine = `[${timestamp}] ${restartTag}: ${resolvedReason}\n`;
   appendFileSync(join(paths.logDir, 'restarts.log'), logLine, 'utf-8');
+
+  // BL-004 Phase 3: stamp the fresh-restart cooldown marker if this is a
+  // dispatch-driven fresh-start (so the next dispatch evaluating cooldown
+  // sees a recent timestamp and skips a redundant restart).
+  if (freshStart) {
+    writeFileSync(
+      join(paths.stateDir, '.last-fresh-restart-at'),
+      timestamp + '\n',
+      'utf-8',
+    );
+  }
+}
+
+// --- Fresh-restart cooldown (BL-2026-05-08-004 Phase 3) -----------------
+
+/**
+ * Default cooldown between dispatch-driven fresh-restarts. Per spec
+ * § Component 6 row "Fast back-to-back small task switches": "max 1
+ * hard-restart per N min unless explicit". 30 min is the operative
+ * threshold (covers a typical phase-of-work; tunable via the
+ * --cooldown-seconds CLI flag or per-agent config in future).
+ */
+export const DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS = 30 * 60;
+
+export interface FreshRestartCooldownStatus {
+  /** ISO 8601 timestamp of the last fresh-restart, or null if never. */
+  last_at: string | null;
+  /** Seconds since the last fresh-restart, or null if never / unparseable. */
+  age_seconds: number | null;
+  /** True if the cooldown window has not elapsed yet. */
+  on_cooldown: boolean;
+  /** Seconds the agent should wait before invoking another fresh-restart. */
+  cooldown_seconds_remaining: number;
+  /** The cooldown window the answer was computed against. */
+  cooldown_seconds_total: number;
+}
+
+/**
+ * Read the dispatch-driven fresh-restart cooldown state. Returns a
+ * "no marker" shape (last_at=null, on_cooldown=false) when the agent
+ * has never invoked a fresh-restart, or when the marker is unreadable
+ * / unparseable (fail-open: don't block restarts on a corrupt marker).
+ *
+ * Called from `cortextos bus check-fresh-restart-cooldown` and reused
+ * by tests. The function is a pure read — it does NOT update the marker.
+ */
+export function getFreshRestartCooldown(
+  paths: BusPaths,
+  cooldownSeconds: number = DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS,
+  now: number = Date.now(),
+): FreshRestartCooldownStatus {
+  const markerPath = join(paths.stateDir, '.last-fresh-restart-at');
+  const empty: FreshRestartCooldownStatus = {
+    last_at: null,
+    age_seconds: null,
+    on_cooldown: false,
+    cooldown_seconds_remaining: 0,
+    cooldown_seconds_total: cooldownSeconds,
+  };
+  if (!existsSync(markerPath)) return empty;
+  let last_at: string;
+  try {
+    last_at = readFileSync(markerPath, 'utf-8').trim();
+  } catch {
+    return empty;
+  }
+  if (!last_at) return empty;
+  const lastMs = Date.parse(last_at);
+  if (!Number.isFinite(lastMs)) return empty;
+  const age_seconds = Math.max(0, Math.floor((now - lastMs) / 1000));
+  const remaining = Math.max(0, cooldownSeconds - age_seconds);
+  return {
+    last_at,
+    age_seconds,
+    on_cooldown: remaining > 0,
+    cooldown_seconds_remaining: remaining,
+    cooldown_seconds_total: cooldownSeconds,
+  };
 }
 
 /**

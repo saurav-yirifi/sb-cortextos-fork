@@ -8,7 +8,7 @@ import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTa
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../bus/system.js';
+import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity, getFreshRestartCooldown, DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS } from '../bus/system.js';
 import { createExperiment, runExperiment, evaluateExperiment, listExperiments, gatherContext, manageCycle, loadExperimentConfig } from '../bus/experiment.js';
 import { browseCatalog, installCommunityItem, prepareSubmission, submitCommunityItem } from '../bus/catalog.js';
 import { collectMetrics, parseUsageOutput, storeUsageData, checkUpstream, collectTelegramCommands, registerTelegramCommands } from '../bus/metrics.js';
@@ -73,7 +73,9 @@ busCommand
   .argument('<text>', 'Message text')
   .argument('[reply-to]', 'Reply to message ID (optional positional form)')
   .option('--reply-to <id>', 'Reply to message ID')
-  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string }) => {
+  .option('--fresh-start', 'Dispatch hint: ask receiver to hard-restart before processing this message — typically because the new task is unrelated to the receiver\'s current work (BL-004 Phase 3)')
+  .option('--no-fresh-start', 'Dispatch hint: explicit override telling receiver NOT to hard-restart for this message — receiver stays in its current session regardless of task type (BL-004 Phase 3)')
+  .action((to: string, priority: string, text: string, replyToArg: string | undefined, opts: { replyTo?: string; freshStart?: boolean }) => {
     // Accept reply-to as either positional arg or --reply-to flag (P2 fix #9)
     const effectiveReplyTo = opts.replyTo ?? replyToArg;
     const validPriorities: Priority[] = ['urgent', 'high', 'normal', 'low'];
@@ -113,9 +115,9 @@ busCommand
       console.error(`Warning: agent '${to}' not found in project. Message will be queued but may never be read.`);
     }
 
-    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo);
+    const msgId = sendMessage(paths, env.agentName, to, priority as Priority, text, effectiveReplyTo, opts.freshStart);
     try {
-      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null }));
+      logEvent(paths, env.agentName, env.org, 'message', 'agent_message_sent', 'info', JSON.stringify({ to, priority, msg_id: msgId, reply_to: effectiveReplyTo ?? null, fresh_start: opts.freshStart ?? null }));
     } catch { /* non-fatal */ }
     console.log(msgId);
   });
@@ -684,11 +686,12 @@ busCommand
   .description('Plan a hard restart (fresh session, no --continue)')
   .option('--reason <why>', 'Reason for restart')
   .option('--handoff-doc <path>', 'Path to handoff document to inject into next session boot prompt')
-  .action(async (opts: { reason?: string; handoffDoc?: string }) => {
+  .option('--fresh-start', 'Mark this as a dispatch-driven fresh-start (writes .last-fresh-restart-at; consumed by check-fresh-restart-cooldown to throttle thrash on rapid task transitions). DO NOT pass for context-overflow restarts (BL-004 Phase 3).')
+  .action(async (opts: { reason?: string; handoffDoc?: string; freshStart?: boolean }) => {
     const { writeFileSync: fsWrite, existsSync: fsExists, mkdirSync: fsMkdir } = require('fs');
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    hardRestart(paths, env.agentName, opts.reason);
+    hardRestart(paths, env.agentName, opts.reason, opts.freshStart);
     if (opts.handoffDoc && fsExists(opts.handoffDoc)) {
       fsMkdir(paths.stateDir, { recursive: true });
       fsWrite(join(paths.stateDir, '.handoff-doc-path'), opts.handoffDoc + '\n', 'utf-8');
@@ -708,6 +711,38 @@ busCommand
       }
     } else {
       console.log('Hard restart planned (daemon not running — will take effect on next start)');
+    }
+  });
+
+// BL-2026-05-08-004 Phase 3 — fresh-restart cooldown reader
+busCommand
+  .command('check-fresh-restart-cooldown')
+  .description('Read fresh-restart cooldown state — agents call this before invoking `hard-restart --fresh-start` in response to a dispatch, to avoid thrash on fast back-to-back unrelated dispatches')
+  .option('--cooldown-seconds <n>', `Cooldown window in seconds (default ${DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS} = 30 min)`, String(DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS))
+  .option('--format <fmt>', 'Output format: json (default) or text', 'json')
+  .action((opts: { cooldownSeconds: string; format: string }) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    // Strict integer parse: reject NaN, Infinity, negatives, AND floats. parseInt('1800.5')
+    // silently returns 1800; per .claude/rules/code-quality/numeric-validation-three-traps.md
+    // counts need an integer guard tighter than typeof/parseInt alone.
+    const raw = opts.cooldownSeconds;
+    const cooldownSeconds = Number(raw);
+    if (!Number.isFinite(cooldownSeconds) || !Number.isInteger(cooldownSeconds) || cooldownSeconds < 0) {
+      console.error(`Invalid --cooldown-seconds: ${raw} (expected non-negative integer)`);
+      process.exit(1);
+    }
+    const status = getFreshRestartCooldown(paths, cooldownSeconds);
+    if (opts.format === 'text') {
+      if (status.last_at === null) {
+        console.log('fresh-restart cooldown: never invoked (no marker)');
+      } else if (status.on_cooldown) {
+        console.log(`fresh-restart cooldown: ON (last ${status.last_at}, ${status.cooldown_seconds_remaining}s remaining of ${status.cooldown_seconds_total}s window)`);
+      } else {
+        console.log(`fresh-restart cooldown: clear (last ${status.last_at}, ${status.age_seconds}s ago > ${status.cooldown_seconds_total}s window)`);
+      }
+    } else {
+      console.log(JSON.stringify(status));
     }
   });
 
@@ -1522,9 +1557,14 @@ busCommand
       return map;
     }
 
-    // Merge in priority order: framework < template < agent (agent wins)
+    // Merge in priority order: framework < community < template < agent (agent wins).
+    // BL-2026-05-08-004 Phase 3: community/skills/ added so community-shared skills like
+    // `context-aware-dispatch` and `profile-failover` are discoverable through this CLI
+    // (their canonical location is `<frameworkRoot>/community/skills/<name>/SKILL.md`).
+    // Without this scan they exist on disk but never surface in `cortextos bus list-skills`.
     const merged = new Map<string, SkillInfo>();
     for (const [k, v] of scanSkillsDir(join(frameworkRoot, '.claude', 'skills'), 'framework')) merged.set(k, v);
+    for (const [k, v] of scanSkillsDir(join(frameworkRoot, 'community', 'skills'), 'community')) merged.set(k, v);
     if (template) {
       for (const [k, v] of scanSkillsDir(join(frameworkRoot, 'templates', template, '.claude', 'skills'), `template:${template}`)) merged.set(k, v);
     }

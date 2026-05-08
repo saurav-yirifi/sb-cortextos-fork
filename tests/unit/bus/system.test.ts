@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execSync } from 'child_process';
-import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity } from '../../../src/bus/system';
+import { selfRestart, hardRestart, autoCommit, checkGoalStaleness, postActivity, getFreshRestartCooldown, DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS } from '../../../src/bus/system';
 import type { BusPaths } from '../../../src/types';
 
 function makePaths(testDir: string, agent: string = 'test-agent'): BusPaths {
@@ -77,6 +77,133 @@ describe('Bus System', () => {
       hardRestart(paths, 'test-agent');
       const logContent = readFileSync(join(paths.logDir, 'restarts.log'), 'utf-8');
       expect(logContent).toContain('HARD-RESTART: no reason specified');
+    });
+
+    // BL-2026-05-08-004 Phase 3 — fresh-restart marker behavior
+    it('does NOT write .last-fresh-restart-at when freshStart is omitted (context restart path)', () => {
+      const paths = makePaths(testDir);
+      hardRestart(paths, 'test-agent', 'context-red');
+      expect(existsSync(join(paths.stateDir, '.last-fresh-restart-at'))).toBe(false);
+    });
+
+    it('does NOT write .last-fresh-restart-at when freshStart=false', () => {
+      const paths = makePaths(testDir);
+      hardRestart(paths, 'test-agent', 'context-red', false);
+      expect(existsSync(join(paths.stateDir, '.last-fresh-restart-at'))).toBe(false);
+    });
+
+    it('writes .last-fresh-restart-at with ISO timestamp when freshStart=true', () => {
+      const paths = makePaths(testDir);
+      const before = Date.now();
+      hardRestart(paths, 'test-agent', 'fresh-start for unrelated dispatch', true);
+      const after = Date.now();
+      const markerPath = join(paths.stateDir, '.last-fresh-restart-at');
+      expect(existsSync(markerPath)).toBe(true);
+      const ts = readFileSync(markerPath, 'utf-8').trim();
+      expect(ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+      const tsMs = Date.parse(ts);
+      expect(tsMs).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000);
+      expect(tsMs).toBeLessThanOrEqual(after + 1000);
+    });
+
+    it('tags fresh-start in restarts.log distinctly', () => {
+      const paths = makePaths(testDir);
+      hardRestart(paths, 'test-agent', 'fresh-start for unrelated', true);
+      const logContent = readFileSync(join(paths.logDir, 'restarts.log'), 'utf-8');
+      expect(logContent).toContain('HARD-RESTART (fresh-start): fresh-start for unrelated');
+    });
+  });
+
+  // BL-2026-05-08-004 Phase 3 — fresh-restart cooldown reader
+  describe('getFreshRestartCooldown', () => {
+    it('returns null-shape when no marker exists', () => {
+      const paths = makePaths(testDir);
+      mkdirSync(paths.stateDir, { recursive: true });
+      const status = getFreshRestartCooldown(paths);
+      expect(status).toEqual({
+        last_at: null,
+        age_seconds: null,
+        on_cooldown: false,
+        cooldown_seconds_remaining: 0,
+        cooldown_seconds_total: DEFAULT_FRESH_RESTART_COOLDOWN_SECONDS,
+      });
+    });
+
+    it('reports on_cooldown=true when marker is recent', () => {
+      const paths = makePaths(testDir);
+      mkdirSync(paths.stateDir, { recursive: true });
+      const fakeNow = Date.parse('2026-05-08T12:00:00Z');
+      const fiveMinAgo = new Date(fakeNow - 5 * 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+      writeFileSync(join(paths.stateDir, '.last-fresh-restart-at'), fiveMinAgo + '\n');
+      const status = getFreshRestartCooldown(paths, 30 * 60, fakeNow);
+      expect(status.on_cooldown).toBe(true);
+      expect(status.last_at).toBe(fiveMinAgo);
+      expect(status.age_seconds).toBe(300);
+      expect(status.cooldown_seconds_remaining).toBe(25 * 60);
+    });
+
+    it('reports on_cooldown=false when marker is older than window', () => {
+      const paths = makePaths(testDir);
+      mkdirSync(paths.stateDir, { recursive: true });
+      const fakeNow = Date.parse('2026-05-08T12:00:00Z');
+      const oneHourAgo = new Date(fakeNow - 60 * 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+      writeFileSync(join(paths.stateDir, '.last-fresh-restart-at'), oneHourAgo + '\n');
+      const status = getFreshRestartCooldown(paths, 30 * 60, fakeNow);
+      expect(status.on_cooldown).toBe(false);
+      expect(status.cooldown_seconds_remaining).toBe(0);
+      expect(status.age_seconds).toBe(3600);
+    });
+
+    it('respects custom cooldownSeconds override', () => {
+      const paths = makePaths(testDir);
+      mkdirSync(paths.stateDir, { recursive: true });
+      const fakeNow = Date.parse('2026-05-08T12:00:00Z');
+      const tenMinAgo = new Date(fakeNow - 10 * 60_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+      writeFileSync(join(paths.stateDir, '.last-fresh-restart-at'), tenMinAgo + '\n');
+      // 5min window: 10min ago is past it
+      expect(getFreshRestartCooldown(paths, 5 * 60, fakeNow).on_cooldown).toBe(false);
+      // 60min window: 10min ago is inside it
+      expect(getFreshRestartCooldown(paths, 60 * 60, fakeNow).on_cooldown).toBe(true);
+    });
+
+    it('fail-opens (on_cooldown=false) on unparseable marker content', () => {
+      const paths = makePaths(testDir);
+      mkdirSync(paths.stateDir, { recursive: true });
+      writeFileSync(join(paths.stateDir, '.last-fresh-restart-at'), 'not-a-date\n');
+      const status = getFreshRestartCooldown(paths);
+      expect(status.on_cooldown).toBe(false);
+      expect(status.last_at).toBe(null);
+    });
+
+    it('round-trips with hardRestart(freshStart=true): cooldown=ON immediately after', () => {
+      const paths = makePaths(testDir);
+      hardRestart(paths, 'test-agent', 'fresh-start for unrelated', true);
+      const status = getFreshRestartCooldown(paths);
+      expect(status.on_cooldown).toBe(true);
+      expect(status.last_at).not.toBeNull();
+      expect(status.age_seconds).toBeLessThan(5);
+    });
+
+    // Locks in spec § Component 6 "max 1 hard-restart per N min UNLESS EXPLICIT": when an
+    // explicit fresh_start=true dispatch arrives during an active cooldown, the agent's
+    // CLAUDE.md "On dispatch receipt" rule fires the restart anyway and the marker is
+    // overwritten. The implementation supports this by always writing the marker on
+    // hardRestart(freshStart=true) — there's no "skip if recent" guard inside the function.
+    it('overwrites marker on second hardRestart(freshStart=true) — explicit bypasses cooldown', async () => {
+      const paths = makePaths(testDir);
+      hardRestart(paths, 'test-agent', 'first fresh-start', true);
+      const firstStatus = getFreshRestartCooldown(paths);
+      expect(firstStatus.on_cooldown).toBe(true);
+      const firstTs = firstStatus.last_at!;
+      // Wait briefly so the second timestamp differs (1s ISO resolution)
+      await new Promise(r => setTimeout(r, 1100));
+      hardRestart(paths, 'test-agent', 'second fresh-start (cooldown bypass)', true);
+      const secondStatus = getFreshRestartCooldown(paths);
+      expect(secondStatus.last_at).not.toBeNull();
+      expect(secondStatus.last_at).not.toBe(firstTs); // overwritten
+      // Both restart-log entries are tagged distinctly so post-mortem can see both fired
+      const logContent = readFileSync(join(paths.logDir, 'restarts.log'), 'utf-8');
+      expect(logContent.match(/HARD-RESTART \(fresh-start\):/g)?.length).toBe(2);
     });
   });
 

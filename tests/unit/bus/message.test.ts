@@ -93,6 +93,46 @@ describe('Message Bus', () => {
         sendMessage(senderPaths, '../bad', 'good', 'normal', 'test')
       ).toThrow();
     });
+
+    // BL-2026-05-08-004 Phase 3 — fresh_start dispatch hint
+    // Lookup by content text instead of positional [0] so future tests in this
+    // describe block writing to the same inbox dir don't shift assertions.
+    function readMessageByText(inboxDir: string, expectedText: string): any {
+      const files = readdirSync(inboxDir).filter(f => f.endsWith('.json'));
+      for (const f of files) {
+        const content = JSON.parse(readFileSync(join(inboxDir, f), 'utf-8'));
+        if (content.text === expectedText) return content;
+      }
+      throw new Error(`No message found in ${inboxDir} with text="${expectedText}"`);
+    }
+
+    it('omits fresh_start when not provided (backwards compat)', () => {
+      const TEXT = 'no hint';
+      sendMessage(senderPaths, 'a', 'b', 'normal', TEXT);
+      const content = readMessageByText(join(testDir, 'inbox', 'b'), TEXT);
+      expect(content).not.toHaveProperty('fresh_start');
+    });
+
+    it('persists fresh_start=true when provided', () => {
+      const TEXT = 'unrelated dispatch';
+      sendMessage(senderPaths, 'a', 'b', 'normal', TEXT, undefined, true);
+      const content = readMessageByText(join(testDir, 'inbox', 'b'), TEXT);
+      expect(content.fresh_start).toBe(true);
+    });
+
+    it('persists fresh_start=false (explicit override) when provided', () => {
+      const TEXT = 'related dispatch';
+      sendMessage(senderPaths, 'a', 'b', 'normal', TEXT, undefined, false);
+      const content = readMessageByText(join(testDir, 'inbox', 'b'), TEXT);
+      expect(content.fresh_start).toBe(false);
+    });
+
+    it('round-trips fresh_start through checkInbox', () => {
+      sendMessage(senderPaths, 'sender', 'receiver', 'normal', 'dispatch', undefined, true);
+      const messages = checkInbox(receiverPaths);
+      expect(messages.length).toBe(1);
+      expect(messages[0].fresh_start).toBe(true);
+    });
   });
 
   describe('checkInbox', () => {
