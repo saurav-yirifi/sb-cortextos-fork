@@ -2490,6 +2490,11 @@ busCommand
   .description('Stop hook: writes last_idle.flag timestamp so fast-checker knows agent finished its turn')
   .action(() => runHook('hook-idle-flag'));
 
+busCommand
+  .command('hook-worktree-warn')
+  .description('SessionStart hook: warn if agent booted inside a canonical shared working tree (BL-005); injects additionalContext + emits worktree_canonical_boot_warning bus event')
+  .action(() => runHook('hook-worktree-warn'));
+
 // --- OAuth token rotation commands ---
 
 busCommand
