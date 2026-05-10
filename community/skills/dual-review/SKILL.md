@@ -29,12 +29,21 @@ The two evaluators are complements, not substitutes. Claude's `code-evaluator` r
 
 ```bash
 # Codex CLI must be installed
-which codex || { echo "codex CLI not installed; falling back to claude-only review"; FALLBACK=1; }
+if ! command -v codex >/dev/null 2>&1; then
+  echo "codex CLI not installed; falling back to claude-only review"
+  FALLBACK=1
+fi
 
-# AND authenticated
-if ! codex login status 2>&1 | grep -qi "logged in"; then
+# AND authenticated — use exit code, not output text
+# (different auth modes return different output strings; exit code is stable)
+if [ -z "$FALLBACK" ] && ! codex login status >/dev/null 2>&1; then
   echo "codex not authenticated; falling back to claude-only review"
   FALLBACK=1
+fi
+
+# Add reviews/ to .gitignore if not already there — keeps session artifacts out of fix-commits
+if ! grep -qE '^reviews/?$' .gitignore 2>/dev/null; then
+  echo "reviews/" >> .gitignore
 fi
 ```
 
@@ -46,22 +55,36 @@ To install codex: `npm install -g @openai/codex` then `codex login`. The plugin 
 
 ## Setup
 
-Determine the session dir and get the diff:
+Determine the session dir, default branch, and get the diff:
 
 ```bash
 PR_NUM="${1:-branch}"
-DATE=$(date -u +%Y-%m-%d)
-SESSION_DIR="reviews/dual-${PR_NUM}-${DATE}"
+TS=$(date -u +%Y-%m-%dT%H%M%SZ)               # full UTC timestamp — multiple runs/day don't overwrite
+SESSION_DIR="reviews/dual-${PR_NUM}-${TS}"
 mkdir -p "$SESSION_DIR"
 
+# Detect default branch — don't assume `main`
+DEFAULT_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null \
+  | sed 's@^refs/remotes/origin/@@')
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"      # fallback only if detection fails
+
 if [ "$PR_NUM" = "branch" ]; then
-  git diff main > "$SESSION_DIR/diff.txt"
-  BASE="main"
+  BASE="$DEFAULT_BRANCH"
+  git diff "$BASE" > "$SESSION_DIR/diff.txt"
 else
-  gh pr diff "$PR_NUM" --repo "$GH_REPO" > "$SESSION_DIR/diff.txt"
   BASE=$(gh pr view "$PR_NUM" --repo "$GH_REPO" --json baseRefName -q .baseRefName)
+  HEAD_SHA=$(gh pr view "$PR_NUM" --repo "$GH_REPO" --json headRefOid -q .headRefOid)
+
+  # Both evaluators must see the SAME diff. Check out the PR head first
+  # so working-tree state is deterministic across both evaluators.
+  git fetch origin "+refs/pull/${PR_NUM}/head:refs/remotes/origin/pr/${PR_NUM}"
+  git checkout "$HEAD_SHA"
+
+  gh pr diff "$PR_NUM" --repo "$GH_REPO" > "$SESSION_DIR/diff.txt"
 fi
 ```
+
+**Working-tree contract:** both evaluators derive their diff from current git state, not from `$SESSION_DIR/diff.txt`. The captured diff file is for audit only. To prove both evaluators see the same change set, the skill checks out the PR head before invoking either. For branch mode, the working tree must be at the branch tip with no unrelated unstaged changes — the skill aborts if `git diff "$BASE"` differs from `git diff "$BASE" HEAD`.
 
 If the diff is empty, tell the user there's nothing to review and stop.
 
@@ -96,14 +119,14 @@ This runs in parallel with Stage 1b (don't wait).
 
 ```bash
 if [ -z "$FALLBACK" ]; then
-  if [ "$PR_NUM" = "branch" ]; then
-    codex review --base "$BASE" > "$SESSION_DIR/codex-review.md" 2>&1
-  else
-    SHA=$(gh pr view "$PR_NUM" --repo "$GH_REPO" --json headRefOid -q .headRefOid)
-    codex review --commit "$SHA" > "$SESSION_DIR/codex-review.md" 2>&1
-  fi
+  # Always use --base to evaluate the FULL diff (not just the tip commit).
+  # Multi-commit PRs would otherwise have Stage 1a (full PR diff) and Stage 1b
+  # (tip commit only) reviewing different change sets, breaking reconciliation.
+  codex review --base "$BASE" > "$SESSION_DIR/codex-review.md" 2>&1
 fi
 ```
+
+For PR mode, the Setup stage already checked out the PR head — `--base "$BASE"` then evaluates HEAD..base, which is the full PR diff. For branch mode, working tree is at the branch tip, same outcome.
 
 Codex output is free-form text, not structured. The reconciliation stage parses it.
 
@@ -167,7 +190,9 @@ If the same finding gets dismissed twice across separate dual-review runs on the
 Apply all FIX-classified findings in one fix-commit:
 
 ```bash
-git add -A
+# git add -u stages tracked files only — keeps reviews/ session artifacts out
+# of the fix-commit (the .gitignore from Prerequisites also prevents accidents).
+git add -u
 git commit -m "$(cat <<EOF
 fix: dual-review feedback
 
