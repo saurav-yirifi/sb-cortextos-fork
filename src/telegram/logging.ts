@@ -7,7 +7,7 @@
 import { appendFileSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { logEvent } from '../bus/event.js';
-import type { BusPaths, TelegramMessage } from '../types/index.js';
+import type { BusPaths, TelegramMessage, TelegramUpdate } from '../types/index.js';
 
 /**
  * Optional metadata attached to an outbound Telegram message log entry.
@@ -116,6 +116,86 @@ export function recordInboundTelegram(
     });
   } catch (err) {
     log?.(`logEvent(telegram_received) failed: ${err}`);
+  }
+}
+
+/**
+ * Archive an inbound Telegram message that the cortextos-side mention-only
+ * filter chose NOT to forward to the agent session. Same JSONL shape as
+ * `inbound-messages.jsonl` plus a `filter_reason` discriminant so post-hoc
+ * diagnostics know WHY the message was dropped.
+ *
+ * Path: `{ctxRoot}/logs/{agentName}/filtered-inbound.jsonl`
+ *
+ * Single source of truth for "messages we received from Telegram but did
+ * not act on" — useful when debugging "why didn't the bot respond to X"
+ * after a privacy-mode quirk or service-message storm. See
+ * BL-2026-05-10-001 § Required new primitives.
+ */
+export function recordFilteredInbound(
+  ctxRoot: string,
+  agentName: string,
+  msg: TelegramMessage,
+  filterReason: string,
+): void {
+  const logDir = join(ctxRoot, 'logs', agentName);
+  mkdirSync(logDir, { recursive: true });
+
+  const entry = JSON.stringify({
+    message_id: msg.message_id,
+    from: msg.from?.id,
+    from_name: msg.from?.first_name ?? msg.from?.username,
+    chat_id: msg.chat?.id,
+    chat_type: msg.chat?.type,
+    text: msg.text ?? msg.caption ?? '',
+    archived_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    agent: agentName,
+    filter_reason: filterReason,
+  });
+
+  appendFileSync(join(logDir, 'filtered-inbound.jsonl'), entry + '\n', 'utf-8');
+}
+
+/**
+ * Append a raw Telegram update (the full payload from `getUpdates`) to a
+ * day-rotated JSONL archive. This is the "we don't know what Telegram
+ * actually sent us" diagnostic surface — every poll-cycle update is
+ * recorded verbatim so future debugging rounds (privacy-mode quirks,
+ * unrecognised entity types, new service-message shapes) have ground
+ * truth instead of guesswork.
+ *
+ * Path: `{ctxRoot}/logs/{agentName}/telegram-updates-YYYY-MM-DD.jsonl`
+ *
+ * Rotated daily by date in filename. Existing inbound-messages.jsonl is
+ * single-file-ever; raw updates rotate because they are MUCH noisier
+ * (every getUpdates result lands here, including no-op heartbeat-style
+ * empty payloads if Telegram ever ships them). Daily rotation is cheap
+ * insurance against unbounded growth.
+ *
+ * Write failures are silently swallowed — diagnostics are nice-to-have
+ * and must never break message processing.
+ */
+export function recordRawTelegramUpdate(
+  ctxRoot: string,
+  agentName: string,
+  update: TelegramUpdate,
+): void {
+  try {
+    const logDir = join(ctxRoot, 'logs', agentName);
+    mkdirSync(logDir, { recursive: true });
+
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const filePath = join(logDir, `telegram-updates-${today}.jsonl`);
+
+    const entry = JSON.stringify({
+      received_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      update_id: update.update_id,
+      update,
+    });
+
+    appendFileSync(filePath, entry + '\n', 'utf-8');
+  } catch {
+    // Diagnostics are best-effort; never break the poller on a log write failure.
   }
 }
 

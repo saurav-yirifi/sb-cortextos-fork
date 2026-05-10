@@ -3,8 +3,9 @@
  * No external dependencies.
  */
 
-import { existsSync, readFileSync } from 'fs';
-import { basename } from 'path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { basename, join } from 'path';
+import type { BotIdentity } from './filter.js';
 
 /**
  * Result of TelegramAPI.validateCredentials. Tagged union so callers can
@@ -617,4 +618,64 @@ export class TelegramAPI {
   private getToken(): string {
     return this.baseUrl.replace('https://api.telegram.org/bot', '');
   }
+}
+
+/**
+ * Load the bot's identity ({id, username}) from the on-disk cache, or
+ * fetch via getMe() and persist if no cache exists. The identity is
+ * stable per bot token, so a single fetch is enough; the disk cache
+ * lets a daemon restart skip the API call entirely.
+ *
+ * Cache path: `<stateDir>/bot-identity.json`
+ *
+ * Failure modes (all return null — caller should fail-open and forward
+ * messages until a later fetch succeeds, since dropping legitimate
+ * traffic is worse than letting service-message noise through):
+ *  - cache read fails (corrupt JSON, partial write)
+ *  - getMe API call throws (network, 401)
+ *  - getMe payload is missing `id` or `username`
+ *
+ * Cache write failures are non-fatal and silently swallowed — the
+ * identity is still returned.
+ */
+export async function loadOrFetchBotIdentity(
+  api: TelegramAPI,
+  stateDir: string,
+): Promise<BotIdentity | null> {
+  const cachePath = join(stateDir, 'bot-identity.json');
+
+  if (existsSync(cachePath)) {
+    try {
+      const cached = JSON.parse(readFileSync(cachePath, 'utf-8')) as Partial<BotIdentity>;
+      if (typeof cached.id === 'number' && typeof cached.username === 'string' && cached.username) {
+        return { id: cached.id, username: cached.username };
+      }
+    } catch {
+      // Fall through to fresh fetch.
+    }
+  }
+
+  let me: any;
+  try {
+    me = await api.getMe();
+  } catch {
+    return null;
+  }
+
+  const id: unknown = me?.result?.id;
+  const username: unknown = me?.result?.username;
+  if (typeof id !== 'number' || typeof username !== 'string' || !username) {
+    return null;
+  }
+
+  const identity: BotIdentity = { id, username };
+
+  try {
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(cachePath, JSON.stringify(identity), 'utf-8');
+  } catch {
+    // Cache write failure is non-fatal — identity is still returned for this run.
+  }
+
+  return identity;
 }

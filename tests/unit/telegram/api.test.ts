@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { TelegramAPI, formatValidateError } from '../../../src/telegram/api';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { TelegramAPI, formatValidateError, loadOrFetchBotIdentity } from '../../../src/telegram/api';
 
 // ---------------------------------------------------------------------------
 // Fetch timeout tests (from main — pre-existing)
@@ -321,5 +324,127 @@ describe('formatValidateError', () => {
       detail: 'Too Many Requests: retry after 5',
     });
     expect(msg).toMatch(/retry/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loadOrFetchBotIdentity — getMe disk-cache primitive (BL-2026-05-10-001)
+// ---------------------------------------------------------------------------
+describe('loadOrFetchBotIdentity', () => {
+  let stateDir: string;
+
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), 'cortextos-bot-id-'));
+  });
+
+  afterEach(() => {
+    rmSync(stateDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function stubApi(getMeImpl: () => Promise<any>): TelegramAPI {
+    const api = new TelegramAPI('test-token');
+    vi.spyOn(api, 'getMe').mockImplementation(getMeImpl);
+    return api;
+  }
+
+  it('fetches via getMe and persists to bot-identity.json on cache miss', async () => {
+    const api = stubApi(async () => ({
+      ok: true,
+      result: { id: 42, username: 'sb_fullstack_bot' },
+    }));
+
+    const identity = await loadOrFetchBotIdentity(api, stateDir);
+    expect(identity).toEqual({ id: 42, username: 'sb_fullstack_bot' });
+
+    const cacheFile = join(stateDir, 'bot-identity.json');
+    expect(existsSync(cacheFile)).toBe(true);
+    const cached = JSON.parse(readFileSync(cacheFile, 'utf-8'));
+    expect(cached).toEqual({ id: 42, username: 'sb_fullstack_bot' });
+    expect(api.getMe).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads from disk cache without calling getMe on hit', async () => {
+    writeFileSync(
+      join(stateDir, 'bot-identity.json'),
+      JSON.stringify({ id: 99, username: 'cached_bot' }),
+    );
+    const api = stubApi(async () => {
+      throw new Error('getMe must not be called');
+    });
+
+    const identity = await loadOrFetchBotIdentity(api, stateDir);
+    expect(identity).toEqual({ id: 99, username: 'cached_bot' });
+    expect(api.getMe).not.toHaveBeenCalled();
+  });
+
+  it('falls back to fresh fetch when cache JSON is corrupt', async () => {
+    writeFileSync(join(stateDir, 'bot-identity.json'), '{ not json');
+    const api = stubApi(async () => ({
+      ok: true,
+      result: { id: 7, username: 'recovered' },
+    }));
+
+    const identity = await loadOrFetchBotIdentity(api, stateDir);
+    expect(identity).toEqual({ id: 7, username: 'recovered' });
+    expect(api.getMe).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to fresh fetch when cache is missing required fields', async () => {
+    writeFileSync(
+      join(stateDir, 'bot-identity.json'),
+      JSON.stringify({ id: 'not-a-number' }),
+    );
+    const api = stubApi(async () => ({
+      ok: true,
+      result: { id: 8, username: 'ok' },
+    }));
+
+    const identity = await loadOrFetchBotIdentity(api, stateDir);
+    expect(identity).toEqual({ id: 8, username: 'ok' });
+  });
+
+  it('returns null when getMe throws and there is no cache (fail-open at caller)', async () => {
+    const api = stubApi(async () => {
+      throw new Error('network down');
+    });
+    const identity = await loadOrFetchBotIdentity(api, stateDir);
+    expect(identity).toBeNull();
+  });
+
+  it('returns null when getMe payload is missing username', async () => {
+    const api = stubApi(async () => ({ ok: true, result: { id: 1 } }));
+    expect(await loadOrFetchBotIdentity(api, stateDir)).toBeNull();
+  });
+
+  it('returns null when getMe returns empty username', async () => {
+    const api = stubApi(async () => ({ ok: true, result: { id: 1, username: '' } }));
+    expect(await loadOrFetchBotIdentity(api, stateDir)).toBeNull();
+  });
+
+  it('still returns the identity if cache write fails (best-effort persistence)', async () => {
+    // Pre-create a regular file at the cache path's parent so mkdirSync
+    // recursive succeeds, but make `bot-identity.json` itself unwritable
+    // by replacing it with a directory of the same name. Then writeFileSync
+    // throws — but the function must still return the identity.
+    mkdirSync(join(stateDir, 'bot-identity.json'));
+
+    const api = stubApi(async () => ({
+      ok: true,
+      result: { id: 11, username: 'partial' },
+    }));
+    const identity = await loadOrFetchBotIdentity(api, stateDir);
+    expect(identity).toEqual({ id: 11, username: 'partial' });
+  });
+
+  it('creates the stateDir on cache write if missing', async () => {
+    const nestedDir = join(stateDir, 'deep', 'nested');
+    const api = stubApi(async () => ({
+      ok: true,
+      result: { id: 1, username: 'mk' },
+    }));
+
+    await loadOrFetchBotIdentity(api, nestedDir);
+    expect(existsSync(join(nestedDir, 'bot-identity.json'))).toBe(true);
   });
 });
