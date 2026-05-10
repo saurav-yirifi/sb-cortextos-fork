@@ -165,6 +165,37 @@ describe('shouldForwardMessage', () => {
       expect(shouldForwardMessage(msg, BOT).forward).toBe(true);
     });
 
+    it('uses caption_entities even when entities is an empty array (Telegram shape for media with empty text)', () => {
+      // Defends against the trap where `msg.entities ?? msg.caption_entities`
+      // silently skipped caption_entities because `[]` is not nullish.
+      const msg = baseMessage({
+        text: '',
+        entities: [],
+        caption: '@sb_fullstack_bot caption-only mention',
+        caption_entities: [{ type: 'mention', offset: 0, length: 17 }],
+      });
+      expect(shouldForwardMessage(msg, BOT).forward).toBe(true);
+    });
+
+    it('does not match a caption-position offset against the wrong source text', () => {
+      // If text is non-empty but entities is empty AND caption_entities
+      // references the caption, the filter must NOT slice the text using
+      // caption-relative offsets. With our pairing, text-having messages
+      // ignore caption_entities outright.
+      const msg = baseMessage({
+        text: 'plain group chatter',
+        entities: [],
+        caption: '@sb_fullstack_bot',
+        caption_entities: [{ type: 'mention', offset: 0, length: 17 }],
+      });
+      // text path: no mention → drop. caption_entities ignored because
+      // text is the active source.
+      expect(shouldForwardMessage(msg, BOT)).toEqual({
+        forward: false,
+        reason: 'no_mention',
+      });
+    });
+
     it('forwards on `text_mention` entity referencing the bot user id', () => {
       // Used for accounts without a public @username (rare for bots,
       // but defensive coverage).

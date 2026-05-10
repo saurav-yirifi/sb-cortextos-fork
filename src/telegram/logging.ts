@@ -131,6 +131,11 @@ export function recordInboundTelegram(
  * not act on" — useful when debugging "why didn't the bot respond to X"
  * after a privacy-mode quirk or service-message storm. See
  * BL-2026-05-10-001 § Required new primitives.
+ *
+ * Write failures are silently swallowed: the call site lives inside
+ * the Phase 2 poller.onMessage callback where an unhandled throw would
+ * stall the poll loop. Diagnostics are best-effort and must never
+ * break message processing — same contract as recordRawTelegramUpdate.
  */
 export function recordFilteredInbound(
   ctxRoot: string,
@@ -138,22 +143,26 @@ export function recordFilteredInbound(
   msg: TelegramMessage,
   filterReason: string,
 ): void {
-  const logDir = join(ctxRoot, 'logs', agentName);
-  mkdirSync(logDir, { recursive: true });
+  try {
+    const logDir = join(ctxRoot, 'logs', agentName);
+    mkdirSync(logDir, { recursive: true });
 
-  const entry = JSON.stringify({
-    message_id: msg.message_id,
-    from: msg.from?.id,
-    from_name: msg.from?.first_name ?? msg.from?.username,
-    chat_id: msg.chat?.id,
-    chat_type: msg.chat?.type,
-    text: msg.text ?? msg.caption ?? '',
-    archived_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-    agent: agentName,
-    filter_reason: filterReason,
-  });
+    const entry = JSON.stringify({
+      message_id: msg.message_id,
+      from: msg.from?.id,
+      from_name: msg.from?.first_name ?? msg.from?.username,
+      chat_id: msg.chat?.id,
+      chat_type: msg.chat?.type,
+      text: msg.text ?? msg.caption ?? '',
+      archived_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      agent: agentName,
+      filter_reason: filterReason,
+    });
 
-  appendFileSync(join(logDir, 'filtered-inbound.jsonl'), entry + '\n', 'utf-8');
+    appendFileSync(join(logDir, 'filtered-inbound.jsonl'), entry + '\n', 'utf-8');
+  } catch {
+    // Diagnostics are best-effort; never break the poller on a log write failure.
+  }
 }
 
 /**

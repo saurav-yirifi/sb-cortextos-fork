@@ -153,10 +153,26 @@ export function shouldForwardMessage(
   //      the surrounding text at [offset, offset+length).
   //    - `text_mention`: tagged-user form (private mention or no-username
   //      account), entity carries an explicit `user` object.
-  //    Caption entities matter when the message is a media post with a
-  //    caption that mentions the bot.
-  const text = msg.text ?? msg.caption ?? '';
-  const entities = msg.entities ?? msg.caption_entities ?? [];
+  //
+  // Pair the entities array to the source string they index into:
+  // text-bearing messages carry `entities` against `msg.text`; media
+  // messages with a caption carry `caption_entities` against
+  // `msg.caption`. A nullish-coalesce `msg.entities ?? msg.caption_entities`
+  // would silently ignore caption entities whenever `msg.entities` is an
+  // empty array — which is a real Telegram shape for media posts whose
+  // text field is absent or empty. Be explicit instead.
+  let text: string;
+  let entities: NonNullable<TelegramMessage['entities']>;
+  if (msg.text !== undefined && msg.text !== '') {
+    text = msg.text;
+    entities = msg.entities ?? [];
+  } else if (msg.caption !== undefined && msg.caption !== '') {
+    text = msg.caption;
+    entities = msg.caption_entities ?? [];
+  } else {
+    text = '';
+    entities = msg.entities ?? msg.caption_entities ?? [];
+  }
   const expectedMention = `@${botIdentity.username.toLowerCase()}`;
 
   for (const ent of entities) {

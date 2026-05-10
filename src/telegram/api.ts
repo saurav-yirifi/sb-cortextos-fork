@@ -655,15 +655,19 @@ export async function loadOrFetchBotIdentity(
     }
   }
 
-  let me: any;
+  type GetMeResponse = {
+    ok?: boolean;
+    result?: { id?: unknown; username?: unknown };
+  };
+  let me: GetMeResponse;
   try {
-    me = await api.getMe();
+    me = (await api.getMe()) as GetMeResponse;
   } catch {
     return null;
   }
 
-  const id: unknown = me?.result?.id;
-  const username: unknown = me?.result?.username;
+  const id = me?.result?.id;
+  const username = me?.result?.username;
   if (typeof id !== 'number' || typeof username !== 'string' || !username) {
     return null;
   }
