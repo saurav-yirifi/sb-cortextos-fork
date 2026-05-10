@@ -223,3 +223,92 @@ describe('TelegramPoller — offset-after-handler', () => {
     }
   });
 });
+
+describe('TelegramPoller — raw-update observers', () => {
+  let stateDir: string;
+
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), 'cortextos-poller-raw-'));
+  });
+
+  afterEach(() => {
+    rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it('fires the constructor-supplied observer once per raw update', async () => {
+    const { api } = makeStubApi([
+      makeMessageUpdate(300, 'first'),
+      makeMessageUpdate(301, 'second'),
+    ]);
+    const seen: number[] = [];
+    const poller = new TelegramPoller(api, stateDir, 1000, undefined, (u) => {
+      seen.push(u.update_id);
+    });
+    poller.onMessage(() => {});
+
+    await poller.pollOnce();
+
+    expect(seen).toEqual([300, 301]);
+  });
+
+  it('fires runtime-registered observers as well', async () => {
+    const { api } = makeStubApi([makeMessageUpdate(400, 'x')]);
+    const poller = new TelegramPoller(api, stateDir);
+    const a: number[] = [];
+    const b: number[] = [];
+    poller.onRawUpdate((u) => a.push(u.update_id));
+    poller.onRawUpdate((u) => b.push(u.update_id));
+    poller.onMessage(() => {});
+
+    await poller.pollOnce();
+
+    expect(a).toEqual([400]);
+    expect(b).toEqual([400]);
+  });
+
+  it('fires the observer BEFORE the message handler runs', async () => {
+    const { api } = makeStubApi([makeMessageUpdate(500, 'order')]);
+    const order: string[] = [];
+    const poller = new TelegramPoller(api, stateDir, 1000, undefined, () => {
+      order.push('observer');
+    });
+    poller.onMessage(() => {
+      order.push('handler');
+    });
+
+    await poller.pollOnce();
+
+    expect(order).toEqual(['observer', 'handler']);
+  });
+
+  it('still fires the observer when the message handler throws', async () => {
+    const { api } = makeStubApi([makeMessageUpdate(600, 'will throw')]);
+    const seen: number[] = [];
+    const poller = new TelegramPoller(api, stateDir, 1000, undefined, (u) => {
+      seen.push(u.update_id);
+    });
+    poller.onMessage(() => {
+      throw new Error('boom');
+    });
+
+    await expect(poller.pollOnce()).resolves.toBeUndefined();
+    expect(seen).toEqual([600]);
+  });
+
+  it('swallows observer exceptions so the poll loop is not wedged', async () => {
+    const { api } = makeStubApi([makeMessageUpdate(700, 'survive')]);
+    const handled: string[] = [];
+    const poller = new TelegramPoller(api, stateDir, 1000, undefined, () => {
+      throw new Error('observer broken');
+    });
+    poller.onMessage((msg) => {
+      handled.push(msg.text ?? '');
+    });
+
+    await expect(poller.pollOnce()).resolves.toBeUndefined();
+    expect(handled).toEqual(['survive']);
+
+    const persisted = readFileSync(join(stateDir, '.telegram-offset'), 'utf-8').trim();
+    expect(persisted).toBe('701');
+  });
+});

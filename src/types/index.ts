@@ -553,6 +553,26 @@ export interface TelegramMessage {
   video_note?: TelegramVideoNote;
   caption?: string;
   reply_to_message?: TelegramMessage;
+  entities?: TelegramMessageEntity[];
+  caption_entities?: TelegramMessageEntity[];
+}
+
+/**
+ * Telegram MessageEntity. We only field-narrow the shapes we actually
+ * inspect — `mention` (the @username form, where username is resolved
+ * from the surrounding text via offset+length) and `text_mention` (the
+ * tagged-user form, which carries an explicit `user` so we don't need
+ * to read text). Other entity types (url, bold, italic, code, ...) are
+ * present in real Telegram payloads but we don't act on them here, so
+ * they fall through the structural check via the open `type: string`.
+ */
+export interface TelegramMessageEntity {
+  type: string;
+  offset: number;
+  length: number;
+  url?: string;
+  user?: TelegramUser;
+  language?: string;
 }
 
 export interface TelegramCallbackQuery {

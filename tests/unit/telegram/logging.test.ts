@@ -6,11 +6,13 @@ import {
   logOutboundMessage,
   logInboundMessage,
   recordInboundTelegram,
+  recordFilteredInbound,
+  recordRawTelegramUpdate,
   cacheLastSent,
   readLastSent,
 } from '../../../src/telegram/logging';
 import { TelegramAPI } from '../../../src/telegram/api';
-import type { BusPaths, TelegramMessage } from '../../../src/types';
+import type { BusPaths, TelegramMessage, TelegramUpdate } from '../../../src/types';
 
 describe('Telegram Logging', () => {
   let testDir: string;
@@ -198,6 +200,132 @@ describe('Telegram Logging', () => {
     it('returns null when file does not exist', () => {
       const result = readLastSent(testDir, 'bot1', '000');
       expect(result).toBeNull();
+    });
+  });
+
+  describe('recordFilteredInbound', () => {
+    it('writes a JSONL entry with filter_reason and message metadata', () => {
+      const msg: TelegramMessage = {
+        message_id: 77,
+        from: { id: 999, first_name: 'Saurav', username: 'sauravb' },
+        chat: { id: -1001234, type: 'supergroup' },
+        text: 'group chatter not addressed to bot',
+      };
+      recordFilteredInbound(testDir, 'fullstack', msg, 'no_mention');
+
+      const logPath = join(testDir, 'logs', 'fullstack', 'filtered-inbound.jsonl');
+      const entry = JSON.parse(readFileSync(logPath, 'utf-8').trim());
+
+      expect(entry.message_id).toBe(77);
+      expect(entry.from).toBe(999);
+      expect(entry.from_name).toBe('Saurav');
+      expect(entry.chat_id).toBe(-1001234);
+      expect(entry.chat_type).toBe('supergroup');
+      expect(entry.text).toBe('group chatter not addressed to bot');
+      expect(entry.agent).toBe('fullstack');
+      expect(entry.filter_reason).toBe('no_mention');
+      expect(entry.archived_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    });
+
+    it('falls back to caption when text is absent (media post path)', () => {
+      const msg: TelegramMessage = {
+        message_id: 78,
+        from: { id: 999, first_name: 'Saurav' },
+        chat: { id: -1001234, type: 'supergroup' },
+        caption: 'photo caption no mention',
+      };
+      recordFilteredInbound(testDir, 'fullstack', msg, 'no_mention');
+
+      const logPath = join(testDir, 'logs', 'fullstack', 'filtered-inbound.jsonl');
+      const entry = JSON.parse(readFileSync(logPath, 'utf-8').trim());
+      expect(entry.text).toBe('photo caption no mention');
+    });
+
+    it('appends multiple entries to the same file', () => {
+      const base: TelegramMessage = {
+        message_id: 1,
+        chat: { id: -1, type: 'supergroup' },
+        text: 'a',
+      };
+      recordFilteredInbound(testDir, 'fullstack', base, 'no_mention');
+      recordFilteredInbound(
+        testDir,
+        'fullstack',
+        { ...base, message_id: 2, text: 'b' },
+        'service_message',
+      );
+
+      const logPath = join(testDir, 'logs', 'fullstack', 'filtered-inbound.jsonl');
+      const lines = readFileSync(logPath, 'utf-8').trim().split('\n');
+      expect(lines).toHaveLength(2);
+      expect(JSON.parse(lines[0]).filter_reason).toBe('no_mention');
+      expect(JSON.parse(lines[1]).filter_reason).toBe('service_message');
+    });
+
+    it('writes empty string when both text and caption are absent', () => {
+      const msg: TelegramMessage = {
+        message_id: 80,
+        chat: { id: -1, type: 'supergroup' },
+        // service-message-shaped, no text, no caption
+        ...({ new_chat_title: 'foo' } as Partial<TelegramMessage>),
+      };
+      recordFilteredInbound(testDir, 'fullstack', msg, 'service_message');
+
+      const logPath = join(testDir, 'logs', 'fullstack', 'filtered-inbound.jsonl');
+      const entry = JSON.parse(readFileSync(logPath, 'utf-8').trim());
+      expect(entry.text).toBe('');
+    });
+  });
+
+  describe('recordRawTelegramUpdate', () => {
+    it('writes a day-rotated JSONL entry containing the full update payload', () => {
+      const update: TelegramUpdate = {
+        update_id: 1234,
+        message: {
+          message_id: 5,
+          chat: { id: -1, type: 'supergroup' },
+          text: 'hello',
+        },
+      };
+      recordRawTelegramUpdate(testDir, 'fullstack', update);
+
+      const today = new Date().toISOString().slice(0, 10);
+      const logPath = join(testDir, 'logs', 'fullstack', `telegram-updates-${today}.jsonl`);
+      const entry = JSON.parse(readFileSync(logPath, 'utf-8').trim());
+
+      expect(entry.update_id).toBe(1234);
+      expect(entry.update.update_id).toBe(1234);
+      expect(entry.update.message.text).toBe('hello');
+      expect(entry.received_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    });
+
+    it('appends multiple updates to the same daily file', () => {
+      recordRawTelegramUpdate(testDir, 'fullstack', {
+        update_id: 1,
+        message: { message_id: 1, chat: { id: -1, type: 'supergroup' }, text: 'a' },
+      });
+      recordRawTelegramUpdate(testDir, 'fullstack', {
+        update_id: 2,
+        message: { message_id: 2, chat: { id: -1, type: 'supergroup' }, text: 'b' },
+      });
+
+      const today = new Date().toISOString().slice(0, 10);
+      const logPath = join(testDir, 'logs', 'fullstack', `telegram-updates-${today}.jsonl`);
+      const lines = readFileSync(logPath, 'utf-8').trim().split('\n');
+      expect(lines).toHaveLength(2);
+      expect(JSON.parse(lines[0]).update_id).toBe(1);
+      expect(JSON.parse(lines[1]).update_id).toBe(2);
+    });
+
+    it('does not throw when the log directory parent is unwritable', () => {
+      // Pass a path that cannot be created (a NUL-terminated path on
+      // POSIX is rejected). The call must swallow the error — diagnostics
+      // are best-effort and must never break the poller.
+      expect(() =>
+        recordRawTelegramUpdate('/dev/null/cannot-mkdir', 'fullstack', {
+          update_id: 99,
+        }),
+      ).not.toThrow();
     });
   });
 });

@@ -7,6 +7,15 @@ import { ensureDir } from '../utils/atomic.js';
 export type MessageHandler = (msg: TelegramMessage) => void;
 export type CallbackHandler = (query: TelegramCallbackQuery) => void;
 export type ReactionHandler = (reaction: TelegramMessageReaction) => void;
+/**
+ * Side-channel observer for every raw Telegram update that comes back
+ * from getUpdates, fired BEFORE any message/callback/reaction handler
+ * runs. Intended for diagnostic logging (see `recordRawTelegramUpdate`)
+ * — the poller does not consume the return value and a thrown
+ * exception inside the observer is swallowed so a logging failure can
+ * never block the poll loop.
+ */
+export type RawUpdateObserver = (update: TelegramUpdate) => void;
 
 /**
  * Telegram polling loop. Replaces the Telegram portion of fast-checker.sh.
@@ -21,6 +30,7 @@ export class TelegramPoller {
   private messageHandlers: MessageHandler[] = [];
   private callbackHandlers: CallbackHandler[] = [];
   private reactionHandlers: ReactionHandler[] = [];
+  private rawUpdateObservers: RawUpdateObserver[] = [];
   private pollInterval: number;
 
   /**
@@ -36,15 +46,36 @@ export class TelegramPoller {
    *   offsets. Without this, two pollers sharing a stateDir would both
    *   write to `.telegram-offset` and lose track of which bot each
    *   offset belonged to.
+   * @param onRawUpdate Optional side-channel observer fired once per raw
+   *   `getUpdates` result, BEFORE any message/callback/reaction handler
+   *   runs. Used for diagnostic logging — see
+   *   `recordRawTelegramUpdate`. Throws inside the observer are
+   *   swallowed so a log write failure cannot break the poll loop.
    */
-  constructor(api: TelegramAPI, stateDir: string, pollInterval: number = 1000, offsetFileSuffix?: string) {
+  constructor(
+    api: TelegramAPI,
+    stateDir: string,
+    pollInterval: number = 1000,
+    offsetFileSuffix?: string,
+    onRawUpdate?: RawUpdateObserver,
+  ) {
     this.api = api;
     this.stateDir = stateDir;
     this.pollInterval = pollInterval;
     this.offsetFileName = offsetFileSuffix
       ? `.telegram-offset-${offsetFileSuffix}`
       : '.telegram-offset';
+    if (onRawUpdate) this.rawUpdateObservers.push(onRawUpdate);
     this.loadOffset();
+  }
+
+  /**
+   * Register an additional raw-update observer at runtime. Most callers
+   * pass the observer at construction; this method exists for tests and
+   * for late-binding scenarios.
+   */
+  onRawUpdate(observer: RawUpdateObserver): void {
+    this.rawUpdateObservers.push(observer);
   }
 
   /**
@@ -111,6 +142,18 @@ export class TelegramPoller {
     for (const update of result.result as TelegramUpdate[]) {
       const nextOffset = update.update_id + 1;
       let handlerFailed = false;
+
+      // Fire raw-update observers first so the diagnostic archive sees
+      // the update even if a downstream handler later throws and blocks
+      // the offset advance. Observer throws are swallowed: logging
+      // failures must never wedge the poll loop.
+      for (const observer of this.rawUpdateObservers) {
+        try {
+          observer(update);
+        } catch (err) {
+          console.error('[telegram-poller] Raw-update observer error:', err);
+        }
+      }
 
       if (update.message) {
         for (const handler of this.messageHandlers) {
