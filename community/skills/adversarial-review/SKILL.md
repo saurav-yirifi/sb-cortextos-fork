@@ -44,6 +44,17 @@ fi
 
 Unlike `dual-review`, this skill has no fallback — Codex IS the reviewer. If codex is unavailable, the skill aborts; use `dual-review` (with FALLBACK) or plain `code-evaluator` instead.
 
+```bash
+# Add reviews/ to .gitignore if not already there.
+# `[ -f .gitignore ]` short-circuits when .gitignore doesn't exist (otherwise grep's
+# non-zero exit would abort under `set -e`).
+if [ -f .gitignore ] && grep -qE '^reviews/?$' .gitignore; then
+  :  # already ignored
+else
+  echo "reviews/" >> .gitignore
+fi
+```
+
 ---
 
 ## Setup
@@ -81,8 +92,6 @@ fi
 # After Stage 2 (or on early exit), restore the original branch:
 #   git checkout "$START_REF"
 ```
-
-Add `reviews/` to `.gitignore` as a one-time setup (same as `dual-review`).
 
 ---
 

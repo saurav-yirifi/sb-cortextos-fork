@@ -42,6 +42,15 @@ fi
 
 No fallback — Codex IS the rescuer. If unavailable, the skill aborts.
 
+```bash
+# Add reviews/ to .gitignore if not already there.
+if [ -f .gitignore ] && grep -qE '^reviews/?$' .gitignore; then
+  :  # already ignored
+else
+  echo "reviews/" >> .gitignore
+fi
+```
+
 ---
 
 ## Setup
@@ -58,8 +67,6 @@ git diff > "$SESSION_DIR/uncommitted.diff"
 git status -s > "$SESSION_DIR/status.txt"
 ```
 
-Add `reviews/` to `.gitignore` as a one-time setup (same convention as other skills).
-
 ---
 
 ## Stage 1: Capture the problem framing
@@ -71,9 +78,9 @@ The invoking agent assembles the rescue prompt. The prompt must include:
 3. **Relevant code excerpts** — the function or module the agent is stuck in, including file paths and line numbers.
 4. **The specific question** — "should I take a different approach?", "is there a pattern I'm missing?", "is this code structurally wrong?"
 
-Template (substitute the placeholders before passing to Codex):
+Template (substitute the placeholders before passing to Codex). The outer fence below is 4-tick (` ```` `) so the inner triple-backtick code block renders correctly:
 
-```
+````
 Goal: <one-sentence user-language goal>
 
 What I've tried:
@@ -93,7 +100,7 @@ Constraints:
 - <e.g. "must work in Node 18+, no native deps">
 - <e.g. "must not change the public API of foo()">
 - <e.g. "must be idempotent">
-```
+````
 
 Write the assembled prompt to `$SESSION_DIR/prompt.txt`.
 
