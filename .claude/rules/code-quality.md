@@ -100,6 +100,7 @@ Format: `- [domain] <slug>: one-line symptom (severity)`. Read the subfile when 
 ### Daemon, supervisors, deployment
 
 - [daemon, supervisors, deployment] `launchd-keepalive`: `KeepAlive: {SuccessfulExit: false}` doesn't restart on clean SIGTERM exit 0 — use plain `KeepAlive: true` (blocker)
+- [daemon, supervisors, restarts, ipc] `restart-path-loses-resolved-args`: function forwards raw input arg instead of locally-resolved value; feature works on boot path, silently no-ops on restart/IPC path (blocker)
 - [cortextos-config, daemon, deployment] `daemon-side-config-requires-daemon-restart`: daemon-side config fields need daemon-restart, not per-agent restart (blocker)
 - [cortextos-config, time, daemon] `daemon-sgt-as-local-tz`: cortextOS daemon interprets cron expressions as SGT local while storage/display claim UTC (blocker)
 - [cortextos-config, daemon] `time-anchored-cron-fire-on-add`: `add-cron` fires once on registration; `update-cron` does not (should-know)
