@@ -25,8 +25,11 @@ import { readFileSync, writeFileSync, readdirSync, existsSync } from 'fs';
 import type { Dirent } from 'fs';
 import { join } from 'path';
 
-/** Top-level agent files always scanned, in order. */
-const AGENT_TOP_FILES = ['CLAUDE.md', 'AGENTS.md', 'ONBOARDING.md'] as const;
+/** Top-level agent files always scanned, in order.
+ *  PR-A2 (2026-05-11): AGENTS.md and ONBOARDING.md were removed from the per-role
+ *  layout. CLAUDE.md is now the single per-role prompt file; onboarding content
+ *  lives in `.claude/skills/onboarding/SKILL.md` and is covered by the skills walk. */
+const AGENT_TOP_FILES = ['CLAUDE.md'] as const;
 
 /** Marker comment that opts a file out of scanning entirely. */
 export const SENTINEL_MARKER = '/loop is intentionally used';

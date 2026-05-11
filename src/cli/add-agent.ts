@@ -351,39 +351,60 @@ function createMinimalAgent(agentDir: string, name: string, org: string, templat
   writeFileSync(join(agentDir, 'MEMORY.md'), `# Long-Term Memory\n\nNothing recorded yet.\n`);
   writeFileSync(join(agentDir, 'USER.md'), `# User Profile\n\nNot configured yet.\n`);
   writeFileSync(join(agentDir, 'SYSTEM.md'), `# System Context\n\nOrganization: ${org}\n`);
-  writeFileSync(join(agentDir, 'TOOLS.md'), `# Available Tools\n\nUse \`cortextos bus <command>\` for bus operations.\n`);
-  // CLAUDE.md is a thin wrapper that imports AGENTS.md (works with Claude Code's @ import syntax)
-  writeFileSync(join(agentDir, 'CLAUDE.md'), '@AGENTS.md\n');
-  writeFileSync(join(agentDir, 'AGENTS.md'), createAgentsMd(name, org, template));
+  writeFileSync(join(agentDir, 'CLAUDE.md'), createClaudeMd(name, org, template));
 }
 
-function createAgentsMd(name: string, org: string, template: string): string {
-  return `# cortextOS ${template.charAt(0).toUpperCase() + template.slice(1)}
+function createClaudeMd(name: string, org: string, template: string): string {
+  const role = template.charAt(0).toUpperCase() + template.slice(1);
+  return `# cortextOS ${role} — ${name}
 
-## BOOTSTRAP PROTOCOL - READ EVERY FILE BEFORE DOING ANYTHING
+You are ${name}, a ${role} for ${org}.
+
+## First Boot Check
+
+If this is your first session, read \`.claude/skills/onboarding/SKILL.md\` and complete the onboarding protocol before doing anything else.
+
+## Bootstrap Protocol (every session)
 
 Read these files at the start of EVERY session:
-1. IDENTITY.md
-2. SOUL.md
-3. GOALS.md
-4. HEARTBEAT.md
-5. MEMORY.md
-6. memory/$(date -u +%Y-%m-%d).md (today's session state)
-7. TOOLS.md
-8. SYSTEM.md
-9. config.json
-10. USER.md
+
+1. IDENTITY.md — who you are
+2. SOUL.md — values and principles
+3. GOALS.md — current focus
+4. HEARTBEAT.md — your operating checklist
+5. GUARDRAILS.md — what to escalate vs. handle
+6. MEMORY.md — long-term memory
+7. memory/$(date -u +%Y-%m-%d).md — today's session state
+8. SYSTEM.md — org context
+9. config.json — runtime knobs
+10. USER.md — user profile
 
 ## Bus Commands
 
-Send messages: \`cortextos bus send-message <agent> <priority> "<text>"\`
-Check inbox: \`cortextos bus check-inbox\`
-ACK messages: \`cortextos bus ack-inbox <id>\`
-Create tasks: \`cortextos bus create-task "<title>" --assignee <agent> --priority <p>\`
-Update tasks: \`cortextos bus update-task <id> <status>\`
-Complete tasks: \`cortextos bus complete-task <id> --result "<text>"\`
-Log events: \`cortextos bus log-event <category> <event> <severity>\`
-Update heartbeat: \`cortextos bus update-heartbeat "<status>"\`
-Send Telegram: \`cortextos bus send-telegram <chat_id> "<text>"\`
+The full CLI reference lives at \`docs_sb/guides/bus-cli-reference.md\`. Most-used:
+
+- Send messages: \`cortextos bus send-message <agent> <priority> "<text>"\`
+- Check inbox: \`cortextos bus check-inbox\`
+- ACK messages: \`cortextos bus ack-inbox <id>\`
+- Create tasks: \`cortextos bus create-task "<title>" --assignee <agent> --priority <p>\`
+- Update tasks: \`cortextos bus update-task <id> <status>\`
+- Log events: \`cortextos bus log-event <category> <event> <severity>\`
+- Update heartbeat: \`cortextos bus update-heartbeat "<status>"\`
+- Send Telegram: \`cortextos bus send-telegram <chat_id> "<text>"\`
+
+## Token & Context Efficiency
+
+- **Batch Bash calls.** Run \`git status && git log -5 && git diff --stat\` in one Bash call; three sequential turns each pay full cache_read.
+- **\`/compact\` cadence.** At phase boundary with context yellow+, ask operator for \`/compact\`. Canned prompts in \`.claude/rules/code-quality/compact-instructions.md\`.
+- **Prefer CLI over MCP.** Use \`gh\`, \`aws\`, \`gcloud\`, \`bun\` directly — fewer per-tool listing tokens than MCP equivalents.
+- **Cache hygiene.** Don't modify tool definitions or system messages mid-session — invalidates the cache prefix.
+
+## Skills
+
+Skills live under \`.claude/skills/<name>/SKILL.md\`. Load on documented triggers. List available skills:
+
+\`\`\`bash
+ls .claude/skills/
+\`\`\`
 `;
 }
