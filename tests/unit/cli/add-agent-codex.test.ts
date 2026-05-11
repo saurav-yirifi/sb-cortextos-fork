@@ -10,7 +10,7 @@
  *
  * The fix routes `--runtime codex-app-server` (with the default --template
  * agent) at templates/agent-codex/, which: (a) documents the bus reply rule
- * prominently in AGENTS.md and TOOLS.md, (b) ships the 23 codex-compatible
+ * prominently in AGENTS.md and TOOLS.md, (b) ships the 26 codex-compatible
  * skills under plugins/cortextos-agent-skills/skills/, and (c) sets runtime
  * + model defaults in config.json.
  *
