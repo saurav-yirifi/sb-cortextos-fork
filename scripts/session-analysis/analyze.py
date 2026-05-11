@@ -14,6 +14,7 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Anthropic Opus 4.x list pricing (USD per 1M tokens) — keep in sync with
@@ -301,6 +302,124 @@ def cmd_compact(args):
     return 0
 
 
+# ----------------------------------------------------- recent-candidates ----
+
+def _derive_agent_name(project_dir_name: str) -> str | None:
+    """Best-effort agent name from encoded-cwd dir name.
+
+    Encoded-cwd replaces '/' with '-'. For cortextos agents the cwd ends in
+    '.../agents/<name>', so the dir name contains '-agents-<name>'.
+    Returns None for projects that don't match the cortextos layout.
+    """
+    marker = "-agents-"
+    idx = project_dir_name.rfind(marker)
+    if idx == -1:
+        return None
+    return project_dir_name[idx + len(marker):]
+
+
+def _parse_iso(ts: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp string into an aware UTC datetime, or None."""
+    if not ts:
+        return None
+    s = ts.rstrip("Z")
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(timezone.utc)
+
+
+def cmd_recent_candidates(args):
+    """Scan every ~/.claude/projects/<encoded-cwd>/, find the most-recently-modified
+    JSONL per agent, and report the latest compact-eligible boundary turn that
+    occurred within --since-minutes. Emits one entry per active session.
+
+    Used by scripts/self-healing/compact-boundary-watcher.sh (cron, every 10 min).
+    """
+    base = Path.home() / ".claude" / "projects"
+    if not base.exists():
+        print("[]" if args.format == "json" else "(no ~/.claude/projects)", file=sys.stderr)
+        return 0
+
+    threshold = args.threshold * 1000
+    since_seconds = args.since_minutes * 60
+    now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - since_seconds
+
+    results = []
+    for proj_dir in sorted(base.iterdir()):
+        if not proj_dir.is_dir():
+            continue
+        jsonls = [p for p in proj_dir.glob("*.jsonl") if p.is_file()]
+        if not jsonls:
+            continue
+        jsonls.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        path = jsonls[0]
+        mtime = path.stat().st_mtime
+        if mtime < cutoff:
+            continue  # stale session — no activity in the window
+
+        turns, agents = _load_session(path)
+        if not turns:
+            continue
+
+        candidate = None
+        # Walk newest-first so the first match is the most recent eligible boundary
+        for i in range(len(turns) - 1, -1, -1):
+            t = turns[i]
+            ts = _parse_iso(t["ts"])
+            if ts is None:
+                continue
+            age = (now - ts).total_seconds()
+            if age > since_seconds:
+                break  # turns are time-ordered; earlier ones are too old
+            ctx = t["cr"] + t["cc"]
+            if ctx < threshold:
+                continue
+            text_only = not t["tools"]
+            gap = False
+            if i + 1 < len(turns):
+                nxt = _parse_iso(turns[i + 1]["ts"])
+                if nxt is not None:
+                    gap = (nxt - ts).total_seconds() > 300
+            if not (text_only or gap):
+                continue
+            candidate = {
+                "session_id": path.stem,
+                "project_dir": proj_dir.name,
+                "jsonl_path": str(path),
+                "agent_name": (agents[-1] if agents else None) or _derive_agent_name(proj_dir.name),
+                "branch": t.get("branch"),
+                "cache_read": t["cr"],
+                "cache_create": t["cc"],
+                "context_total": ctx,
+                "timestamp": t["ts"],
+                "why": "text-boundary" if text_only else "5m-idle-gap",
+                "model": t.get("model"),
+                "jsonl_mtime_unix": mtime,
+            }
+            break
+
+        if candidate:
+            results.append(candidate)
+
+    if args.format == "json":
+        print(json.dumps(results, indent=2))
+    else:
+        if not results:
+            print("(no recent compact candidates)")
+        for c in results:
+            agent = c["agent_name"] or "?"
+            print(
+                f"  {c['timestamp'][:19]}  agent={agent:20s} session={c['session_id'][:8]} "
+                f"cr={human(c['cache_read']):>8s} cc={human(c['cache_create']):>7s}  ({c['why']})"
+            )
+    return 0
+
+
 # ---------------------------------------------------------------- projects ----
 
 def cmd_projects(args):
@@ -353,6 +472,18 @@ def build_parser():
     sp = sub.add_parser("compact-candidates", help="Find turns where /compact would have helped")
     sp.add_argument("--threshold", type=int, default=200, help="Min cache_read+cache_create in K tokens (default 200)")
     sp.set_defaults(func=cmd_compact)
+
+    sp = sub.add_parser(
+        "recent-candidates",
+        help="Scan every agent dir under ~/.claude/projects/ and report sessions with a recent compact-eligible boundary (for compact-boundary-watcher cron)",
+    )
+    sp.add_argument("--since-minutes", type=int, default=10,
+                    help="Only consider sessions whose JSONL was modified in the last N minutes (default 10)")
+    sp.add_argument("--threshold", type=int, default=120,
+                    help="Min cache_read+cache_create in K tokens (default 120 — tuned for 200K-context models)")
+    sp.add_argument("--format", choices=("text", "json"), default="text",
+                    help="Output format (default text; json for cron consumption)")
+    sp.set_defaults(func=cmd_recent_candidates)
 
     sp = sub.add_parser("projects", help="Compare token spend across ALL ~/.claude/projects/")
     sp.add_argument("--limit", type=int, default=20)
