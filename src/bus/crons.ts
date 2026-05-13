@@ -20,6 +20,7 @@ import type { CronDefinition, CronExecutionLogEntry } from '../types/index.js';
 import { CRONS_DIRECTORY, CRONS_FILENAME, cronExecutionLogPathFor } from './crons-schema.js';
 import { atomicWriteSync } from '../utils/atomic.js';
 import { withFileLockSync } from '../utils/lock.js';
+import { resolveCtxRoot } from '../utils/env.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -34,13 +35,15 @@ interface CronsFile {
 /**
  * Resolve the absolute path to an agent's crons.json.
  *
- * Uses CTX_ROOT env var when available (production), otherwise falls back to
- * a path relative to process.cwd() so tests can supply their own root via
- * process.env.CTX_ROOT pointing to a tempdir.
+ * Honours `CTX_ROOT` env var; falls back to the canonical `~/.cortextos/<instance>/`
+ * via `resolveCtxRoot()`. NEVER falls back to `process.cwd()` — see
+ * `resolveCtxRoot()` for the shadow-write bug history.
+ *
+ * Tests must set `process.env.CTX_ROOT` to a tmpdir for isolation (see
+ * `tests/unit/bus/crons-io.test.ts` for the established pattern).
  */
 function cronsFilePath(agentName: string): string {
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
-  return join(ctxRoot, CRONS_DIRECTORY, agentName, CRONS_FILENAME);
+  return join(resolveCtxRoot(), CRONS_DIRECTORY, agentName, CRONS_FILENAME);
 }
 
 /**
@@ -346,8 +349,7 @@ export function getExecutionLogPage(
   offset = 0,
   statusFilter: ExecutionLogStatusFilter = 'all',
 ): ExecutionLogPage {
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
-  const filePath = join(ctxRoot, cronExecutionLogPathFor(agentName));
+  const filePath = join(resolveCtxRoot(), cronExecutionLogPathFor(agentName));
 
   if (!existsSync(filePath)) {
     return { entries: [], total: 0, hasMore: false };

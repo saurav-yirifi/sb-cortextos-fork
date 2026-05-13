@@ -28,6 +28,17 @@ vi.mock('../../../src/bus/crons.js', () => ({
   updateCron: (...args: unknown[]) => mockUpdateCron(...args),
 }));
 
+// Also mock cron-execution-log so the scheduler's fire-path appendExecutionLog
+// call doesn't hit the real filesystem. Prior to this mock, the log writer
+// fell back to `process.cwd()` when CTX_ROOT was unset, leaking
+// `./.cortextOS/state/agents/test-agent/cron-execution.log` into the repo
+// working tree on every `npm test` run.
+vi.mock('../../../src/daemon/cron-execution-log.js', () => ({
+  appendExecutionLog: vi.fn(),
+  MAX_LOG_LINES: 1_000,
+  ROTATION_SIZE_BYTES: 200 * 1_024,
+}));
+
 // ---------------------------------------------------------------------------
 // Imports AFTER mock setup
 // ---------------------------------------------------------------------------
