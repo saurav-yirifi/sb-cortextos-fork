@@ -106,6 +106,28 @@ export function resolveEnv(overrides?: Partial<CtxEnv>): CtxEnv {
 }
 
 /**
+ * Resolve CTX_ROOT for callers that need only the state root (not the full
+ * CtxEnv). Honours `CTX_ROOT` env var first, then `CTX_INSTANCE_ID`, then
+ * falls back to `~/.cortextos/<instance>/` (matches `resolveEnv()` priority
+ * without the file I/O of reading `.cortextos-env`).
+ *
+ * **Never falls back to `process.cwd()`.** That was the root cause of a
+ * silent shadow-write bug where `cortextos bus add-cron <agent> ...` run from
+ * a repo working directory landed in `./.cortextOS/state/agents/<agent>/`
+ * instead of the canonical `~/.cortextos/<instance>/.cortextOS/state/agents/<agent>/`
+ * — invisible to the daemon and silently dropped.
+ *
+ * Tests that need isolation MUST set `process.env.CTX_ROOT` to a tmpdir in
+ * their setup (matching the established `tests/unit/bus/crons-io.test.ts`
+ * pattern). Relying on cwd is no longer supported.
+ */
+export function resolveCtxRoot(): string {
+  if (process.env.CTX_ROOT) return process.env.CTX_ROOT;
+  const instanceId = process.env.CTX_INSTANCE_ID || 'default';
+  return join(homedir(), '.cortextos', instanceId);
+}
+
+/**
  * Write .cortextos-env file for backward compatibility with bash bus scripts.
  * Per D6: maintain this pattern.
  */

@@ -33,6 +33,7 @@ import { join, dirname } from 'path';
 import { randomBytes } from 'crypto';
 import type { CronExecutionLogEntry } from '../types/index.js';
 import { cronExecutionLogPathFor } from '../bus/crons-schema.js';
+import { resolveCtxRoot } from '../utils/env.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -51,10 +52,15 @@ export const ROTATION_SIZE_BYTES = 200 * 1_024;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/** Resolve the absolute path to an agent's execution log. */
+/**
+ * Resolve the absolute path to an agent's execution log.
+ *
+ * Uses `resolveCtxRoot()` — honours `CTX_ROOT` env var, falls back to
+ * canonical `~/.cortextos/<instance>/`. Never falls back to `process.cwd()`
+ * (silent shadow-write bug; see `resolveCtxRoot()` for history).
+ */
 function logFilePath(agentName: string): string {
-  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
-  return join(ctxRoot, cronExecutionLogPathFor(agentName));
+  return join(resolveCtxRoot(), cronExecutionLogPathFor(agentName));
 }
 
 /** Ensure the parent directory exists. */
