@@ -182,6 +182,50 @@ describe('agent-status helpers', () => {
       writeFileSync(join(ctxRoot, 'logs', AGENT, 'restarts.log'), '');
       expect(readLastRestart(ctxRoot, AGENT)).toEqual({});
     });
+
+    // Fleet-resilience #7: CRASH-RESET is an audit annotation, not a
+    // restart kind. Reading it as the lastRestartKind would hide the real
+    // restart underneath, so the tailread skips past it.
+    it('skips a trailing CRASH-RESET line and returns the real restart underneath', () => {
+      mkdirSync(join(ctxRoot, 'logs', AGENT), { recursive: true });
+      const lines = [
+        '[2026-05-15T08:00:00Z] CRASH: exit_code=1 crash_count=8 backoff_s=20',
+        '[2026-05-15T09:00:00Z] SELF-RESTART: cortextos bus self-restart',
+        '[2026-05-15T09:00:02Z] CRASH-RESET: from=8 reason=planned_restart',
+        '',
+      ].join('\n');
+      writeFileSync(join(ctxRoot, 'logs', AGENT, 'restarts.log'), lines);
+      const out = readLastRestart(ctxRoot, AGENT);
+      expect(out.lastRestartKind).toBe('SELF-RESTART');
+      expect(out.lastRestartReason).toBe('cortextos bus self-restart');
+    });
+
+    it('skips multiple back-to-back CRASH-RESET lines', () => {
+      mkdirSync(join(ctxRoot, 'logs', AGENT), { recursive: true });
+      const lines = [
+        '[2026-05-15T08:00:00Z] HARD-RESTART: ops drill',
+        '[2026-05-15T08:00:02Z] CRASH-RESET: from=5 reason=planned_restart',
+        '[2026-05-15T08:30:02Z] CRASH-RESET: from=2 reason=planned_restart',
+        '',
+      ].join('\n');
+      writeFileSync(join(ctxRoot, 'logs', AGENT, 'restarts.log'), lines);
+      const out = readLastRestart(ctxRoot, AGENT);
+      expect(out.lastRestartKind).toBe('HARD-RESTART');
+      expect(out.lastRestartReason).toBe('ops drill');
+    });
+
+    it('returns {} when only CRASH-RESET lines exist (no real restart underneath)', () => {
+      // Edge case: soft-restart from a clean state writes only the
+      // CRASH-RESET annotation (bus/system.ts doesn't pre-write for
+      // soft-restart). With nothing underneath, the tail-reader returns
+      // empty — same surface as a missing/empty file.
+      mkdirSync(join(ctxRoot, 'logs', AGENT), { recursive: true });
+      writeFileSync(
+        join(ctxRoot, 'logs', AGENT, 'restarts.log'),
+        '[2026-05-15T09:00:00Z] CRASH-RESET: from=3 reason=planned_restart\n',
+      );
+      expect(readLastRestart(ctxRoot, AGENT)).toEqual({});
+    });
   });
 
   // ── readLastSpawnFailureAge ────────────────────────────────────────────────

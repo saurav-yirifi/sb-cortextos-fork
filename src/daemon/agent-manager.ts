@@ -793,11 +793,22 @@ export class AgentManager {
    *
    * agentDir is auto-discovered by startAgent() from frameworkRoot/orgs/{org}/agents/{name}.
    * Participates in the pendingRestarts race protection used by restart-all.
+   *
+   * Fleet-resilience #7: pass `{ planned: true }` for operator/CLI-driven
+   * restarts (the ipc-server's restart-agent handler does this for every
+   * `cortextos bus {self,hard,soft}-restart`). The flag is consumed by the
+   * next successful start() to reset .crash_count_today — earned trust on a
+   * clean restart. Auto-restart paths in agent-process.ts (handleExit /
+   * handleSpawnFailure → setTimeout(this.start)) do NOT go through this
+   * method, so they correctly do not get the budget reset.
    */
-  async restartAgent(name: string): Promise<void> {
+  async restartAgent(name: string, opts?: { planned?: boolean }): Promise<void> {
     if (!this.agents.has(name)) {
       console.log(`[agent-manager] Agent ${name} not found — cannot restart`);
       return;
+    }
+    if (opts?.planned) {
+      this.agents.get(name)?.process.markPlannedRestart();
     }
     console.log(`[agent-manager] Restarting ${name}`);
     await this.stopAgent(name);

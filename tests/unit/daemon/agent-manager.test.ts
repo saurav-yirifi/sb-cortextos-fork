@@ -315,6 +315,42 @@ describe('AgentManager.restartAgent - BUG-007 fix (rebuild Telegram poller)', ()
     expect(stopSpy).not.toHaveBeenCalled();
     expect(startSpy).not.toHaveBeenCalled();
   });
+
+  // Fleet-resilience #7: { planned: true } plumbs through to
+  // AgentProcess.markPlannedRestart() before the stop/start sequence so
+  // the next successful start() can reset .crash_count_today.
+  it('passes { planned: true } through to AgentProcess.markPlannedRestart()', async () => {
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const markPlanned = vi.fn();
+    (am as any).agents.set('alice', {
+      process: { markPlannedRestart: markPlanned },
+      checker: {},
+      poller: { stop() {} },
+    });
+    vi.spyOn(am, 'stopAgent').mockResolvedValue();
+    vi.spyOn(am, 'startAgent').mockResolvedValue();
+
+    await am.restartAgent('alice', { planned: true });
+    expect(markPlanned).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT call markPlannedRestart when opts omitted (auto-restart safety)', async () => {
+    // Internal callers that don't pass { planned: true } — e.g. a future
+    // daemon-internal restart that's effectively a crash recovery — must
+    // not get the trust-reset side-effect.
+    const am = new AgentManager('test-instance', ctxRoot, frameworkRoot, 'acme');
+    const markPlanned = vi.fn();
+    (am as any).agents.set('alice', {
+      process: { markPlannedRestart: markPlanned },
+      checker: {},
+      poller: { stop() {} },
+    });
+    vi.spyOn(am, 'stopAgent').mockResolvedValue();
+    vi.spyOn(am, 'startAgent').mockResolvedValue();
+
+    await am.restartAgent('alice');
+    expect(markPlanned).not.toHaveBeenCalled();
+  });
 });
 
 describe('buildReplyContext - Telegram reply context (BUG fix: media replies lost)', () => {

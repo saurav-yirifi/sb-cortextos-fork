@@ -42,6 +42,11 @@ vi.mock('../../../src/utils/paths.js', () => ({
   resolvePaths: vi.fn().mockReturnValue({}),
 }));
 
+const mockLogEvent = vi.fn();
+vi.mock('../../../src/bus/event.js', () => ({
+  logEvent: mockLogEvent,
+}));
+
 const fsMocks = {
   existsSync: vi.fn().mockReturnValue(false),
   readFileSync: vi.fn(),
@@ -105,6 +110,7 @@ beforeEach(() => {
   fsMocks.writeFileSync.mockReset();
   fsMocks.appendFileSync.mockReset();
   fsMocks.statSync.mockReset();
+  mockLogEvent.mockReset();
 });
 
 describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
@@ -535,5 +541,98 @@ describe('AgentProcess - issue #07 follow-up #5: getStatusDeep wiring', () => {
     expect(s.crashesRemaining).toBe(10);
     // No spawn-failure history file → null (definitively no event), not undefined.
     expect(s.lastSpawnFailureAgeSeconds).toBeNull();
+  });
+});
+
+describe('AgentProcess - fleet-resilience #7 (crash-budget reset on planned restart)', () => {
+  it('markPlannedRestart() + start() with accrued crashes zeros .crash_count_today and emits CRASH-RESET', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    // Simulate 9 accrued crashes today (would normally come from prior
+    // handleExit calls). Setting directly keeps the test focused on the
+    // reset path itself; the crash-accumulation path is covered by the
+    // BUG-011 / Issue #07 tests above.
+    (ap as unknown as { crashCount: number }).crashCount = 9;
+
+    ap.markPlannedRestart();
+    await ap.start();
+
+    expect(ap.getStatus().crashCount).toBe(0);
+
+    // .crash_count_today overwritten with <today>:0 (NOT incremented).
+    const today = new Date().toISOString().split('T')[0];
+    expect(fsMocks.writeFileSync).toHaveBeenCalledWith(
+      expect.stringContaining('.crash_count_today'),
+      `${today}:0`,
+      'utf-8',
+    );
+
+    // restarts.log gets a CRASH-RESET audit line with from-count + reason.
+    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
+    const [logPath, logLine] = fsMocks.appendFileSync.mock.calls[0];
+    expect(String(logPath)).toContain('/logs/alice/restarts.log');
+    expect(String(logLine)).toMatch(/\] CRASH-RESET: from=9 reason=planned_restart\b/);
+    expect(String(logLine).endsWith('\n')).toBe(true);
+
+    // logEvent fires with the canonical action + meta.
+    expect(mockLogEvent).toHaveBeenCalledTimes(1);
+    const [, agentArg, , category, action, severity, meta] = mockLogEvent.mock.calls[0];
+    expect(agentArg).toBe('alice');
+    expect(category).toBe('action');
+    expect(action).toBe('crash_budget_reset');
+    expect(severity).toBe('info');
+    expect(meta).toEqual({ agent: 'alice', from_count: 9, reason: 'planned_restart' });
+  });
+
+  it('markPlannedRestart() + start() with crashCount=0 is a no-op (no write, no append, no event)', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    ap.markPlannedRestart();
+    await ap.start();
+
+    expect(ap.getStatus().crashCount).toBe(0);
+    // No .crash_count_today write attributable to reset (start() normally
+    // doesn't write to it on the happy path — only handleExit does).
+    expect(fsMocks.writeFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('.crash_count_today'),
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(fsMocks.appendFileSync).not.toHaveBeenCalled();
+    expect(mockLogEvent).not.toHaveBeenCalled();
+  });
+
+  it('start() WITHOUT markPlannedRestart does NOT reset accrued crashes', async () => {
+    // Crash auto-restart path: handleExit → setTimeout → this.start(). That
+    // call goes directly to start() and never touches markPlannedRestart, so
+    // the flag stays false and the budget keeps accruing toward maxCrashesPerDay.
+    const ap = new AgentProcess('alice', mockEnv, {});
+    (ap as unknown as { crashCount: number }).crashCount = 5;
+
+    await ap.start();
+
+    expect(ap.getStatus().crashCount).toBe(5);
+    expect(fsMocks.appendFileSync).not.toHaveBeenCalled();
+    expect(mockLogEvent).not.toHaveBeenCalled();
+  });
+
+  it('markPlannedRestart flag is consumed (not sticky across lifecycles)', async () => {
+    const ap = new AgentProcess('alice', mockEnv, {});
+    (ap as unknown as { crashCount: number }).crashCount = 3;
+
+    ap.markPlannedRestart();
+    await ap.start();
+    expect(mockLogEvent).toHaveBeenCalledTimes(1);
+    mockLogEvent.mockClear();
+    fsMocks.appendFileSync.mockClear();
+
+    // Simulate a crash to bump the counter again, then a non-planned restart
+    // (e.g. the auto-restart timer firing). The previous markPlannedRestart()
+    // must NOT carry over.
+    (ap as unknown as { crashCount: number }).crashCount = 2;
+    (ap as unknown as { status: string }).status = 'crashed';
+    await ap.start();
+
+    expect(ap.getStatus().crashCount).toBe(2);
+    expect(fsMocks.appendFileSync).not.toHaveBeenCalled();
+    expect(mockLogEvent).not.toHaveBeenCalled();
   });
 });

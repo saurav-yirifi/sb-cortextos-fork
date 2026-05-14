@@ -621,7 +621,12 @@ export class IPCServer {
           if (!request.agent) {
             response = { success: false, error: 'Agent name required' };
           } else {
-            this.agentManager.restartAgent(request.agent)
+            // Fleet-resilience #7: every restart-agent IPC is a planned restart
+            // (sent by `cortextos bus {self,hard,soft}-restart` and friends).
+            // Crash/spawn-fail auto-restarts in agent-process.ts trigger
+            // this.start() directly without going through IPC, so they
+            // correctly never set the planned flag.
+            this.agentManager.restartAgent(request.agent, { planned: true })
               .catch(err => console.error(`Failed to restart ${request.agent}:`, err));
             response = { success: true, data: `Restarting ${request.agent}` };
           }

@@ -148,13 +148,24 @@ export interface LastRestartFields {
  * Read the last non-empty line of `logs/<agent>/restarts.log`. Each line is
  * `[<ts>] <KIND>: <details>`. The kind must be one of the known restart
  * kinds — anything else parses as `lastRestartReason` text without a kind.
+ *
+ * Fleet-resilience #7: `CRASH-RESET` lines are audit annotations emitted by
+ * agent-process.ts when a planned restart zeroes the crash budget. They
+ * record the budget event, not a restart kind, so they are skipped during
+ * tailread — the user-visible lastRestartKind continues to surface the real
+ * restart (SELF-RESTART / HARD-RESTART / etc.) underneath. Multiple
+ * back-to-back CRASH-RESET lines are skipped together (defensive against
+ * future reset paths).
  */
 export function readLastRestart(ctxRoot: string, agentName: string): LastRestartFields {
   try {
     const path = join(ctxRoot, 'logs', agentName, 'restarts.log');
     if (!existsSync(path)) return {};
     const lines = readFileSync(path, 'utf-8').split('\n').map((l) => l.trim()).filter(Boolean);
-    const last = lines.pop();
+    let last: string | undefined;
+    while ((last = lines.pop()) !== undefined) {
+      if (!/^\[[^\]]+\]\s+CRASH-RESET:/.test(last)) break;
+    }
     if (!last) return {};
     // Match `[<ts>] <KIND>: <details>` — kind must be all-caps + hyphens.
     const m = /^\[[^\]]+\]\s+([A-Z][A-Z-]*):\s*(.*)$/.exec(last);
