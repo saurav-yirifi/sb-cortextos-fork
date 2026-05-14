@@ -97,6 +97,13 @@ function snapshotOf(checks: Check[]): Record<string, Check['status']> {
 
 export interface DoctorCronOptions {
   ctxRoot: string;
+  /**
+   * Repository root the checks probe — pass the daemon's `CTX_FRAMEWORK_ROOT`.
+   * Note: the on-demand `cortextos doctor` CLI uses `process.cwd()` instead,
+   * so the two callers may probe different trees if the CLI is run from a
+   * directory other than the daemon's framework root. Intentional: the CLI
+   * "diagnose where I am"; the cron "diagnose the daemon's fleet".
+   */
   frameworkRoot: string;
   instanceId: string;
   /** Default 30 min. 0 disables. */
@@ -135,10 +142,17 @@ export class DoctorCron {
     // Fire one tick immediately so a daemon restart against a broken host
     // surfaces the current state without waiting `intervalMs`. The tick
     // is async; we don't await it here so start() stays non-blocking.
+    // If shutdown happens during this window the initial tick still
+    // completes and writes the snapshot — the cleared interval doesn't
+    // cancel an already-in-flight runOnce.
     void this.runOnce().catch((err) => this.logger(`[doctor-cron] initial tick failed: ${err}`));
     this.timer = setInterval(() => {
       void this.runOnce().catch((err) => this.logger(`[doctor-cron] tick failed: ${err}`));
     }, this.intervalMs);
+    // Don't keep Node alive solely on this interval — the daemon's IPC
+    // server + agent timers do that. Lets tests using start() exit cleanly
+    // if they forget to call stop() (the existing tests use runOnce() directly).
+    this.timer.unref();
   }
 
   stop(): void {
