@@ -80,7 +80,7 @@ Discover the reason by reading the most recent line of:
 ~/.cortextos/default/logs/$CTX_AGENT_NAME/restarts.log
 ```
 
-That file is already populated by `src/bus/system.ts` on every restart with the line format `[<ts>] SELF-RESTART: <reason>` or `[<ts>] HARD-RESTART: <reason>`. Zero new infrastructure.
+That file is already populated by `src/bus/system.ts` on every restart with the line format `[<ts>] SELF-RESTART: <reason>` or `[<ts>] HARD-RESTART: <reason>`. The daemon also writes `[<ts>] CRASH: ...`, `[<ts>] HALTED: ...`, `[<ts>] SPAWN-FAIL: ...`, and `[<ts>] SPAWN-FAIL-HALTED: ...` rows for unplanned exits and spawn failures (the SPAWN-FAIL kinds were added by issue #07 — daemon couldn't respawn PTYs after a `pnpm install` staled the node-pty binding). All of these unplanned kinds map to the `crash-recovery` reason for the rule above. Zero new infrastructure.
 
 The wrapper script `scripts/comms/send-telegram-guarded.sh` enforces this gate automatically — agents should use it instead of bare `cortextos bus send-telegram` for any "online — ready" style ping.
 
