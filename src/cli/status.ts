@@ -24,8 +24,17 @@ export const statusCommand = new Command('status')
           return;
         }
         displayStatuses(statuses);
-      } else if (options.json) {
+        return;
+      }
+      // Daemon responded with an error. In --json mode emit [] so scripts
+      // get a parseable answer; in table mode surface the daemon error so
+      // operators don't get a silent return.
+      if (options.json) {
         process.stdout.write(JSON.stringify([], null, 2) + '\n');
+      } else {
+        const errMsg = (response as { error?: string }).error ?? 'unknown error';
+        console.error(`Daemon returned an error: ${errMsg}`);
+        process.exitCode = 1;
       }
       return;
     }

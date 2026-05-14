@@ -2,9 +2,18 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import type { Heartbeat } from '../types/index.js';
 
-// Local shape mirror — duplicates the SpawnFailureHistory shape from
-// src/daemon/spawn-failure-tracker.ts. Kept local so utils/ doesn't take a
-// dep on daemon/. If the on-disk shape changes, update both.
+// ---------------------------------------------------------------------------
+// Local shape mirror of SpawnFailureHistory (defined in
+// src/daemon/spawn-failure-tracker.ts as of c99a5f9 / 2026-05-15). Mirrored
+// here rather than imported so utils/ doesn't take a dep on daemon/ — that
+// import direction would create a cycle once doctor-cron and heartbeat-watcher
+// (plan #2, #4) reuse these helpers.
+//
+// If the on-disk schema gains fields (e.g. exitCode), keep this mirror in
+// sync OR lift the canonical shape into src/types/index.ts and replace this
+// with an import. Silent skew is the only risk: we only read events[].agent
+// and events[].ts here, so additive changes to other fields are safe.
+// ---------------------------------------------------------------------------
 interface SpawnFailureHistoryReadOnly {
   events?: Array<{ ts: string; agent: string; err?: string }>;
 }
@@ -84,9 +93,12 @@ export function readLastInboxMessageAge(
 }
 
 export interface CrashBudgetFields {
-  crashCountToday?: number;
-  maxCrashesPerDay?: number;
-  crashesRemaining?: number;
+  // All three are always populated — the helper never returns partial budget
+  // info. The corresponding fields on AgentStatus stay optional because the
+  // daemon-down fallback path doesn't construct AgentStatus through here.
+  crashCountToday: number;
+  maxCrashesPerDay: number;
+  crashesRemaining: number;
 }
 
 /**
