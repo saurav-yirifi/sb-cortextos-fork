@@ -17,8 +17,12 @@ vi.mock('child_process', async () => {
   return {
     ...actual,
     spawnSync: (...args: unknown[]) => spawnSyncMock(...args),
-    execSync: (cmd: string) => {
-      if (cmd === 'id -u') return Buffer.from('501\n');
+    execSync: (cmd: string, opts?: { encoding?: string }) => {
+      if (cmd === 'id -u') {
+        // Real `getUid()` calls with `{ encoding: 'utf-8' }`, so execSync
+        // returns string. When called without encoding, it returns Buffer.
+        return opts?.encoding ? '501\n' : Buffer.from('501\n');
+      }
       return actual.execSync(cmd);
     },
   };

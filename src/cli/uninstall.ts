@@ -59,6 +59,10 @@ export const uninstallCommand = new Command('uninstall')
     }
     if (shResult.failed.length > 0) {
       console.log(`  ! Some self-healing unloads failed: ${shResult.failed.join('; ')}`);
+      console.log('    Services may still be registered with launchd. Verify with:');
+      console.log('      launchctl list | grep cortextos');
+      console.log('    To clean up by hand:');
+      console.log('      launchctl bootout gui/$(id -u)/<label>');
     }
 
     if (options.keepState) {

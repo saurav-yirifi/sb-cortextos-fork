@@ -38,8 +38,10 @@ export interface InstallSelfHealingOptions {
   launchAgentsDir?: string;
   /** Override `homedir()` for tests so plist `{HOME}` substitution is hermetic. */
   homeDirOverride?: string;
-  /** Suppress `launchctl` invocations (Linux + tests). When undefined,
-   *  defaults to true on non-darwin platforms. */
+  /** Suppress `launchctl` invocations for tests. On non-darwin platforms
+   *  the function short-circuits earlier via the platform guard, so this
+   *  flag is only useful when you want to run the file-staging path on
+   *  macOS without touching launchd. */
   skipLaunchctl?: boolean;
 }
 
@@ -88,9 +90,13 @@ function isServiceLoaded(service: ServiceName, skipLaunchctl: boolean): boolean 
 
 /** Bootstrap a single plist via the modern launchctl idiom, falling back to
  *  legacy `load -w` for older macOS. Mirrors `src/cli/tunnel.ts:259-281`. */
-function bootstrapService(plistPath: string, label: string, skipLaunchctl: boolean): { ok: boolean; reason?: string } {
+function bootstrapService(
+  plistPath: string,
+  label: string,
+  uid: string,
+  skipLaunchctl: boolean,
+): { ok: boolean; reason?: string } {
   if (skipLaunchctl) return { ok: true };
-  const uid = getUid();
   // Stale-registration cleanup (best effort — both forms; one may exist).
   spawnSync('launchctl', ['bootout', `gui/${uid}/${label}`], { stdio: 'pipe' });
   spawnSync('launchctl', ['bootout', `gui/${uid}`, plistPath], { stdio: 'pipe' });
@@ -107,13 +113,12 @@ function bootstrapService(plistPath: string, label: string, skipLaunchctl: boole
   return { ok: false, reason: (legacy.stderr || legacy.stdout || r.stderr || r.stdout || 'unknown').trim().slice(0, 200) };
 }
 
-function unloadService(plistPath: string, label: string, skipLaunchctl: boolean): void {
-  if (skipLaunchctl) return;
-  const uid = getUid();
+function unloadService(plistPath: string, label: string, uid: string, skipLaunchctl: boolean): { ok: boolean } {
+  if (skipLaunchctl) return { ok: true };
   const r = spawnSync('launchctl', ['bootout', `gui/${uid}/${label}`], { stdio: 'pipe' });
-  if (r.status !== 0) {
-    spawnSync('launchctl', ['unload', '-w', plistPath], { stdio: 'pipe' });
-  }
+  if (r.status === 0) return { ok: true };
+  const legacy = spawnSync('launchctl', ['unload', '-w', plistPath], { stdio: 'pipe' });
+  return { ok: legacy.status === 0 };
 }
 
 function renderPlist(templatePath: string, home: string, instance: string): string {
@@ -148,8 +153,14 @@ export function installSelfHealing(
   const home = opts.homeDirOverride ?? homedir();
   const launchAgentsDir = opts.launchAgentsDir ?? defaultLaunchAgentsDir(home);
   const skipLaunchctl = opts.skipLaunchctl ?? false;
+  // Cache uid once per install — `id -u` is invariant for a given process and
+  // we hit launchctl 4× across the loop.
+  const uid = getUid();
 
-  // Stage 1: copy shell scripts to <ctxRoot>/scripts/
+  // Stage 1: copy shell scripts to <ctxRoot>/scripts/. Must complete BEFORE
+  // we write any plist, because the plists reference these scripts via
+  // ProgramArguments; a `RunAtLoad: true` job (which all four are) would
+  // fail its first invocation if the script weren't on disk yet.
   const scriptsTarget = join(ctxRoot, 'scripts');
   mkdirSync(scriptsTarget, { recursive: true });
   for (const entry of readdirSync(sourceDir)) {
@@ -187,7 +198,7 @@ export function installSelfHealing(
         continue;
       }
 
-      const load = bootstrapService(plistPath, label, skipLaunchctl);
+      const load = bootstrapService(plistPath, label, uid, skipLaunchctl);
       if (load.ok) {
         result.installed.push(service);
       } else {
@@ -219,15 +230,25 @@ export function uninstallSelfHealing(
   const home = opts.homeDirOverride ?? homedir();
   const launchAgentsDir = opts.launchAgentsDir ?? defaultLaunchAgentsDir(home);
   const skipLaunchctl = opts.skipLaunchctl ?? false;
+  const uid = getUid();
 
   const result: { unloaded: string[]; failed: string[] } = { unloaded: [], failed: [] };
   for (const service of SELF_HEALING_SERVICES) {
     const label = plistLabel(service);
     const plistPath = join(launchAgentsDir, `${label}.plist`);
     try {
-      unloadService(plistPath, label, skipLaunchctl);
+      const unload = unloadService(plistPath, label, uid, skipLaunchctl);
       if (existsSync(plistPath)) rmSync(plistPath, { force: true });
-      result.unloaded.push(service);
+      if (unload.ok) {
+        result.unloaded.push(service);
+      } else {
+        // Plist file is gone; launchctl still owns the label. The service
+        // will crash on next launchd-driven exec (its script path is also
+        // about to disappear when ctxRoot is rmSync'd by the caller). The
+        // caller surfaces this in its summary so the operator can run
+        // `launchctl list | grep cortextos` and clean up by hand if needed.
+        result.failed.push(`${service}: launchctl bootout failed (service may still be registered)`);
+      }
     } catch (err) {
       result.failed.push(`${service}: ${(err as Error).message.slice(0, 200)}`);
     }
