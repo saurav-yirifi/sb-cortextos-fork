@@ -229,6 +229,20 @@ export interface AgentConfig {
    */
   telegram_polling?: boolean;
   /**
+   * Fleet-resilience plan #2 — heartbeat-staleness watchdog tuning.
+   *
+   * `heartbeat_stale_threshold_minutes`: how stale the heartbeat must be
+   * before the watcher fires a CRITICAL operator alert. Default 10. Set
+   * to `0` to disable the watcher entirely for this agent (useful for
+   * agents whose heartbeat cron is intentionally infrequent).
+   *
+   * `heartbeat_stale_realert_minutes`: re-alert cadence while still stale.
+   * Default 30. May-14 was a 9h event; a single alert at minute 11
+   * followed by silence is not enough.
+   */
+  heartbeat_stale_threshold_minutes?: number;
+  heartbeat_stale_realert_minutes?: number;
+  /**
    * Claude account profile name. Resolves to a CLAUDE_CONFIG_DIR via
    * `orgs/<org>/profiles.json`. When unset, the spawn path falls back
    * to `default_profile` from the registry (no env override if the

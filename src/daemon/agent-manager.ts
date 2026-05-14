@@ -25,6 +25,7 @@ import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { recordAndMaybeEscalate as recordSpawnFailureAndMaybeEscalate } from './spawn-failure-tracker.js';
 import { recordCronDispatchAndMaybeEscalate } from './cron-dispatch-tracker.js';
+import { HeartbeatStalenessWatcher } from './heartbeat-staleness-watcher.js';
 
 type LogFn = (msg: string) => void;
 
@@ -32,7 +33,7 @@ type LogFn = (msg: string) => void;
  * Manages all agents in a cortextOS instance.
  */
 export class AgentManager {
-  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller }> = new Map();
+  private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller; heartbeatWatcher?: HeartbeatStalenessWatcher }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
   /** Daemon-level cron scheduler registry: one CronScheduler per enabled agent. */
   private cronSchedulers: Map<string, CronScheduler> = new Map();
@@ -349,7 +350,39 @@ export class AgentManager {
       });
     }
 
-    this.agents.set(name, { process: agentProcess, checker });
+    // Fleet-resilience plan #2 — wire the heartbeat-staleness watchdog.
+    // Per-agent ownership; lifecycle piggybacked on stopAgent's existing
+    // teardown loop. Skipped entirely when the operator sets threshold=0
+    // (e.g. on agents with intentionally infrequent heartbeats).
+    //
+    // We also subscribe to status changes to stop the watcher when the agent
+    // is permanently halted. We deliberately keep the watcher RUNNING during
+    // a 'crashed' state, because a prolonged crash-loop without recovery is
+    // exactly the staleness signal the watcher exists to catch. For 'halted'
+    // the operator already gets the dedicated halt Telegram (above) — further
+    // 30-min re-alerts about a knowingly-down agent are noise.
+    const hbThresholdMin = config.heartbeat_stale_threshold_minutes ?? 10;
+    const hbRealertMin = config.heartbeat_stale_realert_minutes ?? 30;
+    let heartbeatWatcher: HeartbeatStalenessWatcher | undefined;
+    if (hbThresholdMin > 0) {
+      heartbeatWatcher = new HeartbeatStalenessWatcher({
+        agentName: name,
+        ctxRoot: this.ctxRoot,
+        frameworkRoot: this.frameworkRoot,
+        thresholdMs: hbThresholdMin * 60_000,
+        realertMs: hbRealertMin * 60_000,
+        logger: (msg) => log(msg),
+      });
+      const watcher = heartbeatWatcher;
+      agentProcess.onStatusChanged((status) => {
+        if (status.status === 'halted') {
+          watcher.stop();
+        }
+      });
+      heartbeatWatcher.start();
+    }
+
+    this.agents.set(name, { process: agentProcess, checker, heartbeatWatcher });
 
     // Start agent
     await agentProcess.start();
@@ -717,6 +750,7 @@ export class AgentManager {
 
     if (entry.poller) entry.poller.stop();
     if (entry.activityPoller) entry.activityPoller.stop();
+    if (entry.heartbeatWatcher) entry.heartbeatWatcher.stop();
     entry.checker.stop();
     await entry.process.stop();
     this.agents.delete(name);
