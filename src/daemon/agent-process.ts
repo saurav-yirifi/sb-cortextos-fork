@@ -755,6 +755,11 @@ export class AgentProcess {
 
     // Honor in-flight stop / daemon shutdown — never recover an intentional teardown.
     if (this.stopRequested || this.stopping || this.isDaemonShuttingDown()) {
+      // Mirror handleExit: clear stopRequested as we consume it. Without
+      // this, a stop-racing-spawn-fail leaves the flag latched forever, so
+      // the NEXT (unrelated) exit fires the same teardown branch and gets
+      // misclassified as intentional — silently eating a real crash.
+      this.stopRequested = false;
       // Fire side-channel BEFORE status change so the storm detector sees the
       // failure even on intentional teardown (a stale binding caused the
       // failure regardless of whether the operator asked to stop).
@@ -792,6 +797,12 @@ export class AgentProcess {
     this.notifyStatusChange();
 
     setTimeout(() => {
+      // Guards: the operator may have called stop() during the backoff
+      // window. status==='crashed' alone is insufficient because halted
+      // branch returns early above (so we can't reach here) — but a stop()
+      // call after this timer was scheduled still needs to suppress the
+      // retry. Both stopping (in flight) and stopRequested (set, not yet
+      // observed) cover that.
       if (this.status === 'crashed' && !this.stopping && !this.stopRequested) {
         this.start().catch(retryErr => this.log(`Spawn-fail retry failed: ${retryErr}`));
       }

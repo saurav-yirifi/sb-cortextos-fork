@@ -444,6 +444,10 @@ describe('AgentProcess - issue #07: pty.spawn() failure recovery', () => {
     // No restarts.log row, no .crash_count_today increment — this is a
     // stop-race, not a real crash from the agent's perspective.
     expect(fsMocks.appendFileSync).not.toHaveBeenCalled();
+    // Regression guard: stopRequested must be CLEARED as we consume it.
+    // If left latched, the next legitimate crash would also take the
+    // teardown branch and get silently eaten as "intentional stop".
+    expect((ap as unknown as { stopRequested: boolean }).stopRequested).toBe(false);
   });
 
   it('does NOT retry during daemon shutdown', async () => {
