@@ -42,8 +42,11 @@ describe('checkNodeModulesMtime', () => {
     expect(r.stale).toBe(false);
   });
 
+  // Note: HFS+ / ext4 mtime resolution can be 1s, so use whole-second
+  // timestamps for this equality assertion. APFS/ZFS go to nanosecond
+  // but the lowest-common-denominator behavior is what we pin here.
   it('returns stale=false when mtime equals daemonStartedAt (strictly newer threshold)', () => {
-    const ts = new Date('2026-05-15T10:00:00.000Z');
+    const ts = new Date('2026-05-15T10:00:00.000Z');  // whole second
     writePkgWithMtime(ts.getTime());
 
     const r = checkNodeModulesMtime(frameworkRoot, ts);

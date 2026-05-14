@@ -1,4 +1,4 @@
-import { existsSync, statSync } from 'fs';
+import { statSync } from 'fs';
 import { join } from 'path';
 
 /**
@@ -13,6 +13,11 @@ import { join } from 'path';
  * Returns `stale: true` only when `node_modules/package.json` mtime is
  * strictly newer than `daemonStartedAt`. Missing file or any stat error
  * yields `stale: false` — disk weirdness must NEVER block agent boot.
+ *
+ * Uses a single `statSync` (no `existsSync` precheck) to avoid a TOCTOU
+ * window where an in-flight pnpm install can unlink the file between
+ * the existence check and the stat — exactly when we'd want the
+ * warning to fire.
  */
 export interface NodeModulesMtimeResult {
   stale: boolean;
@@ -25,7 +30,6 @@ export function checkNodeModulesMtime(
 ): NodeModulesMtimeResult {
   try {
     const pkg = join(frameworkRoot, 'node_modules', 'package.json');
-    if (!existsSync(pkg)) return { stale: false };
     const st = statSync(pkg);
     const mtime = st.mtime;
     if (mtime.getTime() > daemonStartedAt.getTime()) {
@@ -33,6 +37,8 @@ export function checkNodeModulesMtime(
     }
     return { stale: false, mtime };
   } catch {
+    // Any error (ENOENT, EACCES, mid-install race) → no warning. Cause was
+    // unobservable; never block agent boot on disk weirdness.
     return { stale: false };
   }
 }

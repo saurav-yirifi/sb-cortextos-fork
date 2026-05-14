@@ -226,27 +226,22 @@ export class AgentProcess {
   }
 
   /**
-   * Fleet-resilience #8: one-stat warning for `node_modules` reinstalled
-   * while the daemon was running. Non-blocking — the agent has already
-   * reported `running` by the time we get here; this only annotates the
-   * environment for the operator. The 2026-05-14 outage was exactly this
-   * sequence (operator ran pnpm install → spawn-helper exec bit dropped →
-   * `posix_spawnp failed` 9h later). PRs #37/#40 catch the failure; this
-   * catches the precondition so the operator can act before the next agent
-   * actually fails to spawn.
+   * Fleet-resilience #8 precondition surface — non-blocking warning after
+   * the agent reports `running`. See `checkNodeModulesMtime`'s JSDoc for
+   * the underlying signal and motivation.
    */
   private warnIfNodeModulesStale(): void {
     if (!this.daemonStartedAt) return;
     try {
       const result = checkNodeModulesMtime(this.env.frameworkRoot, this.daemonStartedAt);
-      if (!result.stale) return;
+      if (!result.stale || !result.mtime) return;
       this.log(
-        `⚠️ node_modules newer than daemon start (mtime=${result.mtime?.toISOString()}, daemon=${this.daemonStartedAt.toISOString()}) — possible reinstall during daemon lifetime; recommend pm2 restart cortextos-daemon`,
+        `⚠️ node_modules newer than daemon start (mtime=${result.mtime.toISOString()}, daemon=${this.daemonStartedAt.toISOString()}) — possible reinstall during daemon lifetime; recommend pm2 restart cortextos-daemon`,
       );
       const paths = resolvePaths(this.name, this.env.instanceId, this.env.org);
       logEvent(paths, this.name, this.env.org, 'action', 'node_modules_mtime_warning', 'warning', {
         agent: this.name,
-        node_modules_mtime: result.mtime?.toISOString(),
+        node_modules_mtime: result.mtime.toISOString(),
         daemon_started_at: this.daemonStartedAt.toISOString(),
       });
     } catch {
