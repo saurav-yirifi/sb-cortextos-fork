@@ -18,6 +18,7 @@ import {
   readLastRestart,
   readLastSpawnFailureAge,
 } from '../utils/agent-status.js';
+import { logEvent } from '../bus/event.js';
 
 type LogFn = (msg: string) => void;
 
@@ -78,6 +79,13 @@ export class AgentProcess {
   // (each start() recreates the PTY, but the Telegram handle persists).
   private telegramApi: TelegramAPI | null = null;
   private telegramChatId: string | null = null;
+  // Fleet-resilience #7: transient flag set by AgentManager.restartAgent({planned:true})
+  // before the stop+start sequence. Consumed in the next successful start() to
+  // reset .crash_count_today (earned trust on a planned restart). Crash and
+  // spawn-fail auto-restarts leave it false, so their budget keeps accruing.
+  // Always cleared after the first start() observes it — never persists across
+  // multiple lifecycles.
+  private pendingPlannedRestart: boolean = false;
 
   constructor(name: string, env: CtxEnv, config: AgentConfig, log?: LogFn) {
     this.name = name;
@@ -187,6 +195,8 @@ export class AgentProcess {
       this.sessionStart = new Date();
       this.log(`Running (pid: ${this.pty.getPid()})`);
 
+      this.maybeResetCrashBudgetForPlannedRestart();
+
       // Start session timer
       this.startSessionTimer();
 
@@ -194,6 +204,15 @@ export class AgentProcess {
     } catch (err) {
       this.handleSpawnFailure(err);
     }
+  }
+
+  /**
+   * Fleet-resilience #7: called by AgentManager.restartAgent({planned:true})
+   * BEFORE the stop+start sequence. The flag is consumed by the next
+   * successful start() — see maybeResetCrashBudgetForPlannedRestart() below.
+   */
+  markPlannedRestart(): void {
+    this.pendingPlannedRestart = true;
   }
 
   /**
@@ -869,6 +888,72 @@ export class AgentProcess {
       return base.slice(0, 200);
     }
     return String(err).slice(0, 200);
+  }
+
+  /**
+   * Fleet-resilience #7: consume pendingPlannedRestart. If a planned restart
+   * is in flight AND the agent had accrued crashes today, zero the counter,
+   * overwrite .crash_count_today with `<today>:0`, append a CRASH-RESET line
+   * to restarts.log, and emit a `crash_budget_reset` event.
+   *
+   * The flag is ALWAYS cleared (success or no-op) so a leftover flag from a
+   * previous lifecycle can never bleed into the next start.
+   */
+  private maybeResetCrashBudgetForPlannedRestart(): void {
+    const wasPlanned = this.pendingPlannedRestart;
+    this.pendingPlannedRestart = false;
+    if (!wasPlanned || this.crashCount === 0) return;
+
+    const fromCount = this.crashCount;
+    this.crashCount = 0;
+
+    // Overwrite .crash_count_today with `<today>:0`. resetCrashCountIfNewDay's
+    // write path is the same file; we bypass it deliberately because we want
+    // a hard zero, not the "new day == 1" semantics.
+    const today = new Date().toISOString().split('T')[0];
+    const crashFile = join(this.env.ctxRoot, 'logs', this.name, '.crash_count_today');
+    try {
+      ensureDir(join(this.env.ctxRoot, 'logs', this.name));
+      writeFileSync(crashFile, `${today}:0`, 'utf-8');
+    } catch {
+      /* swallow — never break start() on a logging failure */
+    }
+
+    this.appendCrashResetToRestartsLog(fromCount);
+
+    try {
+      const paths = resolvePaths(this.name, this.env.instanceId, this.env.org);
+      logEvent(paths, this.name, this.env.org, 'action', 'crash_budget_reset', 'info', {
+        agent: this.name,
+        from_count: fromCount,
+        reason: 'planned_restart',
+      });
+    } catch {
+      /* swallow — telemetry never blocks start() */
+    }
+
+    this.log(`Crash budget reset: ${fromCount} → 0 (planned restart)`);
+  }
+
+  /**
+   * Fleet-resilience #7: audit annotation for the planned-restart reset.
+   * Format mirrors bus/system.ts and appendCrashToRestartsLog. Sits ON TOP
+   * of the SELF-RESTART / HARD-RESTART line written by the CLI before the
+   * IPC fires (or stands alone for soft-restart, which doesn't pre-write).
+   * readLastRestart() in src/utils/agent-status.ts skips CRASH-RESET lines
+   * so the user-visible lastRestartKind continues to surface the real
+   * restart kind underneath.
+   */
+  private appendCrashResetToRestartsLog(fromCount: number): void {
+    try {
+      const logDir = join(this.env.ctxRoot, 'logs', this.name);
+      ensureDir(logDir);
+      const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+      const logLine = `[${timestamp}] CRASH-RESET: from=${fromCount} reason=planned_restart\n`;
+      appendFileSync(join(logDir, 'restarts.log'), logLine, 'utf-8');
+    } catch {
+      /* swallow — never break start() on a logging failure */
+    }
   }
 
   private resetCrashCountIfNewDay(today: string): void {

@@ -148,13 +148,20 @@ export interface LastRestartFields {
  * Read the last non-empty line of `logs/<agent>/restarts.log`. Each line is
  * `[<ts>] <KIND>: <details>`. The kind must be one of the known restart
  * kinds — anything else parses as `lastRestartReason` text without a kind.
+ *
+ * Trailing `CRASH-RESET:` lines are skipped because they're audit annotations
+ * for the crash-budget reset, not a restart kind themselves — the real
+ * restart underneath is what users want to see in `lastRestartKind`.
  */
 export function readLastRestart(ctxRoot: string, agentName: string): LastRestartFields {
   try {
     const path = join(ctxRoot, 'logs', agentName, 'restarts.log');
     if (!existsSync(path)) return {};
     const lines = readFileSync(path, 'utf-8').split('\n').map((l) => l.trim()).filter(Boolean);
-    const last = lines.pop();
+    let last: string | undefined;
+    while ((last = lines.pop()) !== undefined) {
+      if (!/^\[[^\]]+\]\s+CRASH-RESET:/.test(last)) break;
+    }
     if (!last) return {};
     // Match `[<ts>] <KIND>: <details>` — kind must be all-caps + hyphens.
     const m = /^\[[^\]]+\]\s+([A-Z][A-Z-]*):\s*(.*)$/.exec(last);

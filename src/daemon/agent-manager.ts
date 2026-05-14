@@ -156,7 +156,13 @@ export class AgentManager {
    * spawn each agent in its correct org dir regardless of what
    * `CTX_ORG` the daemon was started with.
    */
-  async startAgent(name: string, agentDir: string, config?: AgentConfig, org?: string): Promise<void> {
+  async startAgent(
+    name: string,
+    agentDir: string,
+    config?: AgentConfig,
+    org?: string,
+    opts?: { planned?: boolean },
+  ): Promise<void> {
     if (this.agents.has(name)) {
       // BUG-031: this branch was the workaround for the BUG-011 PTY race
       // (restart-all could send stop+start simultaneously, and the new
@@ -389,6 +395,15 @@ export class AgentManager {
     }
 
     this.agents.set(name, { process: agentProcess, checker, heartbeatWatcher });
+
+    // Fleet-resilience #7: a planned restart (CLI bus self/hard/soft-restart)
+    // ran stopAgent → discarded the old AgentProcess → constructed this new
+    // one. The reset flag lives on the freshly-constructed process so the
+    // start() call below can consume it. Must be set BEFORE start() because
+    // start()'s success path is what reads the flag.
+    if (opts?.planned) {
+      agentProcess.markPlannedRestart();
+    }
 
     // Start agent
     await agentProcess.start();
@@ -793,15 +808,27 @@ export class AgentManager {
    *
    * agentDir is auto-discovered by startAgent() from frameworkRoot/orgs/{org}/agents/{name}.
    * Participates in the pendingRestarts race protection used by restart-all.
+   *
+   * Fleet-resilience #7: pass `{ planned: true }` for operator/CLI-driven
+   * restarts (the ipc-server's restart-agent handler does this for every
+   * `cortextos bus {self,hard,soft}-restart`). The flag is consumed by the
+   * next successful start() to reset .crash_count_today — earned trust on a
+   * clean restart. Auto-restart paths in agent-process.ts (handleExit /
+   * handleSpawnFailure → setTimeout(this.start)) do NOT go through this
+   * method, so they correctly do not get the budget reset.
    */
-  async restartAgent(name: string): Promise<void> {
+  async restartAgent(name: string, opts?: { planned?: boolean }): Promise<void> {
     if (!this.agents.has(name)) {
       console.log(`[agent-manager] Agent ${name} not found — cannot restart`);
       return;
     }
     console.log(`[agent-manager] Restarting ${name}`);
     await this.stopAgent(name);
-    await this.startAgent(name, '');
+    // Fleet-resilience #7: plumb `planned` through stopAgent (discards the
+    // old AgentProcess) into startAgent (constructs the new one). Calling
+    // markPlannedRestart on the old process before stopAgent is a no-op
+    // because the flag lives on the instance that gets discarded.
+    await this.startAgent(name, '', undefined, undefined, opts);
     console.log(`[agent-manager] Restart complete for ${name}`);
   }
 

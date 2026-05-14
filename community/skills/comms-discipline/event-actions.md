@@ -41,6 +41,7 @@ Detection-side events emitted by daemon watchdogs and user-foreground CLIs (e.g.
 | `heartbeat_stale_detected` | `src/daemon/heartbeat-staleness-watcher.ts` | per-agent watcher sees `last_heartbeat` ts older than `heartbeat_stale_threshold_minutes` (default 10); re-fires every `heartbeat_stale_realert_minutes` (default 30) while still stale | `agent`, `age_seconds`, `threshold_seconds` |
 | `heartbeat_recovered` | `src/daemon/heartbeat-staleness-watcher.ts` | heartbeat ts updates after a stale period — clears watcher state | `agent`, `was_stale_for_seconds` |
 | `doctor_delta_detected` | `src/daemon/doctor-cron.ts` | periodic doctor run sees a `pass→warn`, `pass→fail`, `warn→fail` transition (or first run after daemon start with current warn/fail) | `new_failures` (string[]), `new_warnings` (string[]), `resolved` (string[]) |
+| `crash_budget_reset` | `src/daemon/agent-process.ts` (per-agent) | planned restart (`cortextos bus {self,hard,soft}-restart`) succeeds and zeroes a non-zero `.crash_count_today` — earned trust. Auto-restart paths (CRASH, SPAWN-FAIL) never emit this | `agent`, `from_count` (number), `reason: "planned_restart"` |
 
 ### Transport: stderr + JSONL under `_daemon`
 
@@ -68,6 +69,8 @@ And the parallel JSONL row (one of many; written to `~/.cortextos/<instance>/org
 
 The `port_collision_recovered` event is the only daemon-scope watchdog still stderr-only — it fires from the dashboard CLI, not the daemon, and so doesn't have a stable daemon identity in scope. Grep the dashboard log for it.
 
+`crash_budget_reset` (and any other event that fires from a real `AgentProcess` rather than daemon scope) lands as JSONL under the agent's own identity — not `_daemon`. Query those with the real agent name: `cortextos bus read-agent-events <agent> --event crash_budget_reset --since 24h`.
+
 The `_daemon` agent identity passes `AGENT_NAME_REGEX` in `src/utils/validate.ts` (`/^[a-z0-9_-]+$/`) and is auto-discovered by `cortextos bus read-agent-events` via the `analytics/events/*` directory scan — no CLI flag changes needed. The underscore prefix sorts the synthetic identity ahead of real agents in directory listings.
 
 **Querying examples:**
@@ -76,6 +79,7 @@ The `_daemon` agent identity passes `AGENT_NAME_REGEX` in `src/utils/validate.ts
 cortextos bus read-agent-events _daemon --event heartbeat_stale_detected --since 24h
 cortextos bus read-agent-events _daemon --event cron_dispatch_storm_detected --since 7d
 cortextos bus read-agent-events _daemon --event doctor_delta_detected --since 24h --format json
+cortextos bus read-agent-events <agent> --event crash_budget_reset --since 24h
 ```
 
 ## State-delta semantics

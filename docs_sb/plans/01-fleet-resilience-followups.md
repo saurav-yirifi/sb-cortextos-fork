@@ -2,9 +2,73 @@
 
 **Owner:** Saurav
 **Origin:** Issue #07 (`docs_sb/issues/07-posix-spawnp-after-pnpm-reinstall.md`) — May 14 9h silent outage post-mortem
-**Status:** Planned — pick items off the top as capacity allows
+**Status:** Tier-1 trio + #3 + #5 **SHIPPED 2026-05-15** (PRs #42–#48). Tier-2 (#6–#8) + Tier-3 (#9–#11) still planned.
 **Created:** 2026-05-15
 **Last validated against code:** 2026-05-15 (file:line refs throughout the spec sections were verified against `main`; re-check before picking up a phase that hasn't been touched in a few weeks)
+
+## Progress (2026-05-15)
+
+| Item | Status | PR | Notes |
+|---|---|---|---|
+| docs: expanded plan v2 | ✅ shipped | [#42](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/42) | This document (Goal-state + dep graph + per-item specs). |
+| #3 dashboard EADDRINUSE | ✅ shipped | [#43](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/43) | `src/utils/port-probe.ts` + pre-bind probe with `3010→3020→3030` fallback, `--no-port-probe` escape hatch. |
+| #5 status `--json` foundation | ✅ shipped | [#44](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/44) | 9 deep-health fields added to `AgentStatus`; cheap `getStatus()` / deep `getStatusDeep()` split on `AgentProcess`. |
+| #1 cron-dispatch storm + `operator-alert.ts` extract | ✅ shipped | [#45](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/45) | Cross-cutting `operator-alert.ts` lifted; ≥3 distinct crons / 30 min → CRITICAL; `cron-scheduler.ts` `onDispatchFailed` hook. |
+| #2 heartbeat-staleness watchdog | ✅ shipped | [#46](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/46) | Per-agent `HeartbeatStalenessWatcher`; cold-boot safe (arms after first read), 2-consecutive-miss tolerance. Required promoting `AgentProcess.onStatusChanged` to multi-subscriber. |
+| #4 doctor cron + 31-check extraction | ✅ shipped | [#47](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/47) | New `src/utils/health-checks.ts` (flat module); new `DoctorCron`; new `src/utils/daemon-config.ts` lazy loader for `~/.cortextos/<instance>/config/daemon.json`. `cortextos doctor` output unchanged. |
+| deep-eval cross-phase fixes | ✅ shipped | [#48](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/48) | Wired the previously-dead `cron_dispatch_storm_threshold` daemon-config knob; honest stderr-vs-JSONL transport section in the comms-discipline glossary. |
+| #6 self-healing launchd install | ⏸ planned | — | Tier 2. Next-up if operator capacity allows. |
+| #7 crash-budget reset on planned restart | ✅ shipped | [#49](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/49) | Tier 2. `AgentProcess.markPlannedRestart()` flag set on the freshly-constructed process inside `startAgent`. CRASH-RESET audit annotation + queryable `crash_budget_reset` event. |
+| #8 `node_modules` mtime warning | ⏸ planned | — | Tier 2. `daemonStartedAt` already exposed in PR #47 as forward-compat. |
+| #9 agent-supervisor IPC heartbeat | ⏸ deferred | — | Tier 3. Only if #2 proves insufficient in practice; spec is still TBD. |
+| #10 macOS quarantine xattr | ⏸ deferred | — | Tier 3. Low real-world incidence. |
+| #11 fleet-health dashboard widget | ⏸ deferred | — | Tier 3. PR #44's `--json` payload is the data source when this lands. |
+
+### Test footprint
+
+`npm test` count: **2054 → 2162** (+108 across 8 new test files / 1 modified). Zero regressions across the trajectory.
+
+### Goal-state delivery
+
+The four alert tiers from the original Goal-state section all have wired code paths on `main`:
+
+1. ✅ Sustained dispatch failure → `cron_dispatch_storm_detected` via `src/daemon/cron-dispatch-tracker.ts` (PR #45, hooked from `agent-manager.ts:startAgentCronScheduler`).
+2. ✅ Wedged-but-alive agent → `heartbeat_stale_detected` via `src/daemon/heartbeat-staleness-watcher.ts` (PR #46, one watcher per agent owned by `AgentManager`).
+3. ✅ New `warn`/`fail` from `doctor` → `doctor_delta_detected` via `src/daemon/doctor-cron.ts` (PR #47, wired in `src/daemon/index.ts` after agent discovery).
+4. ✅ Dashboard EADDRINUSE thrash → `port_collision_recovered` via `src/utils/port-probe.ts` (PR #43, called from `src/cli/dashboard.ts` before bind).
+
+**What's still missing for "verified done":** the live-fire staging smoke described in the Verification section below has not yet been run. The code paths exist on `main`, the unit tests pin them, but no operator has confirmed an end-to-end alert lands inside the SLA on a real fleet.
+
+## Next steps
+
+In priority order. Pick from the top.
+
+### Step 1 — Live-fire staging smoke (operator action, ~1 hour)
+
+Source: this doc's "Verification of done" section (below). Run all three on a staging instance with the operator Telegram chat wired (`CTX_OPERATOR_CHAT_ID` + `CTX_OPERATOR_BOT_TOKEN` in env, or one agent's `.env` with `BOT_TOKEN` + `CHAT_ID`).
+
+1. Force a cron dispatch storm — temporarily make `injectAgent()` return false for 3+ different crons within 30 min. Confirm a single CRITICAL Telegram inside SLA.
+2. Freeze an agent's heartbeat — `truncate -s 0 ~/.cortextos/default/state/<agent>/heartbeat.json` or pause its heartbeat cron. Confirm alert at threshold + 1 min and re-alert at +31 min.
+3. Break a doctor check — `chmod -x` the spawn-helper. Wait up to 30 min. Confirm `doctor_delta_detected` alert with `new_failures: ["node-pty spawn-helper"]`.
+
+If any of the three doesn't fire, that's a wiring bug to root-cause before moving to Tier 2.
+
+### Step 2 — Tier 2, in this order
+
+- **#6 self-healing scripts installed by default** — closes "great scripts that nobody uses" gap. Touches `cortextos install` / `cortextos uninstall`; macOS-only (launchd). Spec section below is current.
+- **#7 crash-budget reset on planned restart** — small (~50 LOC), high-utility for operators routinely doing `cortextos restart <agent>`. Spec section below is current.
+- **#8 `node_modules` mtime warning** — one extra stat in `AgentProcess.start()`. PR #47 already exposed `Daemon.daemonStartedAt`; consume it from `agent-process.ts`. Spec section below is current.
+
+### Step 3 — Tier 3, only if needed
+
+- **#9 agent-supervisor IPC heartbeat** — explicit do-not-build unless #2's file-poll surface proves insufficient in practice. After 4+ weeks of #2 in production, revisit.
+- **#10 macOS quarantine xattr** — add when there's a real-world incidence. PR #47's `src/utils/health-checks.ts` already has the natural insertion point (`node-pty spawn-helper` section).
+- **#11 fleet-health dashboard widget** — Telegram covers the urgent case. Build when control-panel ergonomics rise above other dashboard work. PR #44's `cortextos status --json` is the data source — no IPC plumbing to invent.
+
+### Step 4 — Follow-up cleanup (small, can pick anytime)
+
+- **Daemon pseudo-agent identity for `logEvent`** — PR #48's glossary update acknowledges the watchers (`heartbeat-watcher`, `doctor-cron`, etc.) emit stderr structured lines, not JSONL. When operators want `cortextos bus read-agent-events --event heartbeat_stale_detected` to actually return rows, plumb a synthetic "daemon" agent identity into `logEvent` and migrate the three watchers' emissions. Not blocking — grep on the daemon log file covers the immediate query need.
+- **`ecosystem.config.js` dashboard supervision** — PR #43 fixed the EADDRINUSE thrash *symptom* on the dashboard. The root cause (327 PM2 restarts) was traced to a launchd plist / external supervisor outside this repo. Track that down and add `max_restarts: 3` so the supervisor fails fast instead of hammering forever.
 
 ## Goal state
 
@@ -136,6 +200,8 @@ Each phase below names tests but doesn't prescribe the framework — match what'
 
 ### #1 — Cron-dispatch-failure escalation
 
+**Status:** ✅ Shipped 2026-05-15 in [PR #45](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/45). Code at `src/daemon/cron-dispatch-tracker.ts`, wired from `src/daemon/agent-manager.ts:startAgentCronScheduler` via `CronScheduler.onDispatchFailed`. Threshold override wired through `daemon.json:cron_dispatch_storm_threshold` in [PR #48](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/48).
+
 **Problem.** Post-mortem section "Contributing factors #2": when `injectAgent()` returns false, `cron-scheduler.ts:523-540` logs WARN and advances the slot. Right for one-off misses; silent over hours when the same agent stays down. May 14 had 8+ different crons fire-and-fail every 30 min for 9h with zero escalation.
 
 **Spec.** Mirror `spawn-failure-tracker.ts` semantics but scoped to cron dispatch.
@@ -187,6 +253,8 @@ Likely fix: `cortextos restart boss` or `pm2 restart cortextos-daemon`
 
 ### #2 — Heartbeat-staleness watchdog
 
+**Status:** ✅ Shipped 2026-05-15 in [PR #46](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/46). Code at `src/daemon/heartbeat-staleness-watcher.ts`, one watcher per agent owned by `AgentManager`. Implementation required promoting `AgentProcess.onStatusChanged` to multi-subscriber so the new halt-stop handler doesn't clobber the existing Telegram crash/halt handler.
+
 **Problem.** Agents write `state/<agent>/heartbeat.json` with `last_heartbeat: ISO8601` and `current_task` (`src/types/index.ts:118-129`). Nothing watches it from the daemon side. PTY-alive-but-Claude-wedged-inside-a-tool-call shows no signal in restarts.log, status stays `running`, no alert.
 
 **Spec.** Daemon polls each agent's heartbeat file every 60s; flags stale when `now - ts > threshold`.
@@ -228,6 +296,8 @@ Suggested: `cortextos bus inject boss "ping?"` to nudge
 
 ### #3 — Dashboard EADDRINUSE auto-recovery
 
+**Status:** ✅ Shipped 2026-05-15 in [PR #43](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/43). Code at `src/utils/port-probe.ts`, called from `src/cli/dashboard.ts` before `spawn(next, ...)`. `--no-port-probe` escape hatch. Note: the `ecosystem.config.js` `max_restarts: 3` change from the original spec was deferred — there's no dashboard PM2 app in this repo's `ecosystem.config.js`; the 327-restart thrash was coming from a launchd plist / external supervisor outside the repo. Tracked as "Step 4 follow-up cleanup".
+
 **Problem.** `cortextos-dashboard` is at **327 restarts** in PM2 because it keeps hitting `EADDRINUSE :3000` against some other process. The dashboard is CLI-spawned by `src/cli/dashboard.ts:28-34` (default port 3010 per the validated code, though the live process may be running on 3000 — confirm before picking up). PM2 respawns into the same conflict forever. Unrelated to issue #07 but exemplifies "self-restart without diagnosing root cause = thrash".
 
 **Spec.** Pre-bind probe in `dashboardCommand`. If port occupied: log loudly, try next port in a fixed list (3010 → 3020 → 3030), fail fast after N attempts.
@@ -257,6 +327,8 @@ export async function findFreePort(preferred: number, fallbacks: number[]): Prom
 ---
 
 ### #4 — Doctor as a periodic cron
+
+**Status:** ✅ Shipped 2026-05-15 in [PR #47](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/47). 31 checks extracted to flat `src/utils/health-checks.ts` (single file with `// ── Section ──` banners — flat won the over-decompose tradeoff). New `src/daemon/doctor-cron.ts` runs them every 30 min and emits delta-only alerts. New `src/utils/daemon-config.ts` lazy loader reads `~/.cortextos/<instance>/config/daemon.json`. `cortextos doctor` CLI output unchanged (verified by reading the rewritten thin renderer).
 
 **Problem.** `src/cli/doctor.ts` runs ~30 health checks (`Check { name, status, message, fix? }` at line 9-14; inline `Check[]` at line 22+). All on-demand. The trigger for "doctor saw something" is "Saurav noticed the fleet is dead and ran the command", which inverts the desired direction.
 
@@ -305,6 +377,8 @@ Run `cortextos doctor` for full output.
 
 ### #5 — `cortextos status --json` deep-health view
 
+**Status:** ✅ Shipped 2026-05-15 in [PR #44](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/44). All 9 fields land on `AgentStatus` in `src/types/index.ts:849-880`. Population logic lives in pure helpers at `src/utils/agent-status.ts`; `AgentProcess.getStatus()` stays cheap (in-memory only) and `AgentProcess.getStatusDeep()` does the disk reads — used by `AgentManager.getAllStatuses` at IPC-status time, not in the per-mutation notifier path.
+
 **Problem.** Today `cortextos status` is table-only (`src/cli/status.ts:82-107`). Raw IPC `{type:'status'}` returns `AgentStatus` with `{ name, status, pid, uptime, sessionStart, crashCount, model }` (`agent-process.ts:319-331`). Not enough to build #2, #4, or #11 against without each rolling its own state reader.
 
 **Spec.** Additive only — extend the IPC `AgentStatus` payload and add a `--json` flag to the CLI.
@@ -346,6 +420,8 @@ interface AgentStatus {
 
 ### #6 — Self-healing scripts installed by default
 
+**Status:** ⏸ Planned. Next-up in Tier 2. Foundation pieces from PR #47 (`src/utils/daemon-config.ts`) are available for re-use if any install-time toggles want a per-instance home.
+
 **Problem.** `scripts/self-healing/{watchdog,agent-recover,usage-monitor,compact-boundary-watcher}.sh` plus `.plist.template` files are in the repo but require a manual `launchctl load` step that this machine missed entirely (`launchctl list | grep cortextos` was empty on May 14).
 
 **Spec.** Fold installation into `cortextos install` (`src/cli/install.ts:82-284+`).
@@ -379,6 +455,8 @@ interface AgentStatus {
 
 ### #7 — Crash-budget reset on planned-restart
 
+**Status:** ✅ Shipped 2026-05-15 in [PR #49](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/49). The flag is a transient `private pendingPlannedRestart` on `AgentProcess`, set inside `AgentManager.startAgent` on the freshly-constructed process (NOT on the stale registry entry — the latter would be a silent no-op caught by code-evaluator). Consumer side: `readLastRestart` in `src/utils/agent-status.ts` skips trailing `CRASH-RESET:` lines so the user-visible `lastRestartKind` keeps surfacing the real restart kind underneath. `soft-restart-all` resets every agent's budget in one shot by design — every IPC `restart-agent` is treated as planned.
+
 **Problem.** `.crash_count_today` (`logs/<agent>/.crash_count_today`, format `YYYY-MM-DD:count`, written at `agent-process.ts:829-843`) only resets at midnight. An agent that crashed 9 times in the morning is one crash from `halted` for the rest of the day. A successful planned restart should reset to 0 — that's earned trust.
 
 **Spec.** Track the *kind* of the last restart; on a successful `start()` after a `SELF-RESTART`, `HARD-RESTART`, or user-initiated restart, reset the counter.
@@ -403,6 +481,8 @@ interface AgentStatus {
 
 ### #8 — node_modules-mtime warning on agent start
 
+**Status:** ⏸ Planned. Tier 2. `Daemon.daemonStartedAt: Date` was added as a readonly field on the `Daemon` class in [PR #47](https://github.com/saurav-yirifi/sb-cortextos-fork/pull/47) as forward-compat for this item — `src/daemon/agent-process.ts:start()` just needs to read it via dependency injection through `AgentManager`.
+
 **Problem.** PRs #37 and #40 prevent the *failure mode* (spawn-helper invalidated by reinstall) but a future change could introduce a similar staleness. Cheap telemetry, one stat call.
 
 **Spec.** On every `AgentProcess.start()` (`src/daemon/agent-process.ts:85-186`), after the successful spawn at line 176 (where `sessionStart` is set), `statSync(<repoRoot>/node_modules/package.json).mtime`. If newer than the **daemon's** start time (not the per-agent sessionStart — daemon process startup, which would need to be exposed; if not available, use the earliest sessionStart across all agents as a proxy), log a CRITICAL warning. Do not block, do not auto-restart.
@@ -426,6 +506,8 @@ interface AgentStatus {
 
 ### #9 — Agent-supervisor IPC heartbeat
 
+**Status:** ⏸ Deferred. Tier 3. Explicit do-not-build unless #2's file-poll surface (shipped in PR #46) proves insufficient. Revisit after 4+ weeks of #2 in production.
+
 **Problem.** Today's heartbeat is agent → file → daemon polls. #2 catches file-staleness from the daemon side. A daemon-pushed IPC ping closes the symmetry: daemon expects a `pong` within N seconds.
 
 **Spec.** TBD when scoped. Open question: does each agent's Node host run its own IPC server (heavier — new infrastructure) or piggyback the existing inject/status IPC (lighter — but Claude Code's PTY may not surface socket-level signals)? Decide before writing code.
@@ -437,6 +519,8 @@ interface AgentStatus {
 ---
 
 ### #10 — macOS quarantine xattr check
+
+**Status:** ⏸ Deferred. Tier 3. Low real-world incidence. Natural insertion point exists at `src/utils/health-checks.ts` (the `node-pty spawn-helper` section from PR #47's extraction).
 
 **Problem.** Gatekeeper can set `com.apple.quarantine` on downloaded binaries, which can block exec even with the right mode bits. Not seen in production but theoretically possible for the spawn-helper prebuild path.
 
@@ -461,6 +545,8 @@ async function clearQuarantineXattr(path: string): Promise<{ cleared: boolean }>
 ---
 
 ### #11 — Fleet-health dashboard widget
+
+**Status:** ⏸ Deferred. Tier 3. Data source is ready: `cortextos status --json` (shipped in PR #44) returns the full `AgentStatus[]` payload with all 9 deep-health fields. No IPC plumbing to invent.
 
 **Problem.** No glanceable surface for "is the fleet OK right now?". Operator finds out about problems via manual `cortextos status` or Telegram.
 
