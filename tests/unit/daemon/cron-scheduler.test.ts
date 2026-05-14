@@ -841,6 +841,24 @@ describe('CronScheduler', () => {
     trackerScheduler.stop();
   });
 
+  it('onDispatchFailed callback is NOT invoked on a successful fire', async () => {
+    const dispatchFailed = vi.fn();
+    mockReadCrons.mockReturnValue([makeCron({ schedule: '1m' })]);
+
+    const okScheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: () => { /* succeeds */ },
+      logger: () => {},
+      onDispatchFailed: dispatchFailed,
+    });
+
+    okScheduler.start();
+    await vi.advanceTimersByTimeAsync(60_000 + TICK);
+
+    expect(dispatchFailed).not.toHaveBeenCalled();
+    okScheduler.stop();
+  });
+
   it('onDispatchFailed callback errors are swallowed so the scheduler stays alive', async () => {
     const failingFire = vi.fn().mockRejectedValue(new Error('PTY unavailable'));
     const dispatchFailed = vi.fn().mockImplementation(() => { throw new Error('tracker exploded'); });

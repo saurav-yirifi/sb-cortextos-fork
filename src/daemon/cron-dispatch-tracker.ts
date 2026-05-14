@@ -123,7 +123,7 @@ export function buildEscalationMessage(
  * The escalation persists `lastAlertAt` BEFORE firing the alert so a daemon
  * crash mid-Telegram doesn't reset the cooldown.
  */
-export function recordAndMaybeEscalate(
+export function recordCronDispatchAndMaybeEscalate(
   ctxRoot: string,
   frameworkRoot: string,
   agent: string,

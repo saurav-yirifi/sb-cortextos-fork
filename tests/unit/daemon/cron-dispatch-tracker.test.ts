@@ -32,7 +32,7 @@ import {
   countRecentDistinctCrons,
   shouldEscalate,
   buildEscalationMessage,
-  recordAndMaybeEscalate,
+  recordCronDispatchAndMaybeEscalate,
   CRON_DISPATCH_HISTORY_MAX,
   CRON_DISPATCH_DISTINCT_THRESHOLD,
   CRON_DISPATCH_COOLDOWN_MS,
@@ -81,7 +81,7 @@ describe('cron-dispatch history persistence', () => {
 
   it('record appends and caps at CRON_DISPATCH_HISTORY_MAX', () => {
     for (let i = 0; i < CRON_DISPATCH_HISTORY_MAX + 5; i++) {
-      recordAndMaybeEscalate(ctxRoot, '/tmp/no-fw', 'alice', `cron-${i}`);
+      recordCronDispatchAndMaybeEscalate(ctxRoot, '/tmp/no-fw', 'alice', `cron-${i}`);
     }
     const h = readCronDispatchHistory(ctxRoot);
     expect(h.events.length).toBe(CRON_DISPATCH_HISTORY_MAX);
@@ -198,7 +198,7 @@ describe('buildEscalationMessage', () => {
   });
 });
 
-describe('recordAndMaybeEscalate', () => {
+describe('recordCronDispatchAndMaybeEscalate', () => {
   let ctxRoot: string;
   let frameworkRoot: string;
   beforeEach(() => {
@@ -211,60 +211,60 @@ describe('recordAndMaybeEscalate', () => {
   });
 
   it('first two distinct crons do not escalate', () => {
-    expect(recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat').escalated).toBe(false);
-    expect(recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'morning-review').escalated).toBe(false);
+    expect(recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat').escalated).toBe(false);
+    expect(recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'morning-review').escalated).toBe(false);
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('third DISTINCT cron in window escalates exactly once', () => {
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat');
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'morning-review');
-    const r = recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'check-approvals');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'morning-review');
+    const r = recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'check-approvals');
     expect(r.escalated).toBe(true);
     expect(spawnSyncMock).toHaveBeenCalledOnce();
   });
 
   it('same cron repeating does NOT count toward distinctness', () => {
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat');
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat');
-    const r = recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat');
+    const r = recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'heartbeat');
     expect(r.escalated).toBe(false);
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('two crons + one repeat does NOT escalate', () => {
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'b');
-    const r = recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a'); // repeat
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'b');
+    const r = recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a'); // repeat
     expect(r.escalated).toBe(false);
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('per-agent isolation: agent X failures do not trip agent Y', () => {
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'analyst', 'a');
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'analyst', 'b');
-    const r = recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'c');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'analyst', 'a');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'analyst', 'b');
+    const r = recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'c');
     expect(r.escalated).toBe(false);
     // boss only has 2 distinct (a, c); analyst has 2 distinct (a, b). Neither escalates.
   });
 
   it('cooldown gates a second escalation in the same window', () => {
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'b');
-    const first = recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'c');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'b');
+    const first = recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'c');
     expect(first.escalated).toBe(true);
     spawnSyncMock.mockClear();
     // Fourth distinct cron right after the alert — still inside cooldown.
-    const second = recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'd');
+    const second = recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'd');
     expect(second.escalated).toBe(false);
     expect(spawnSyncMock).not.toHaveBeenCalled();
   });
 
   it('persists lastAlertAt atomically before the alert fires', () => {
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'b');
-    recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'c');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'b');
+    recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'c');
     expect(existsSync(cronDispatchHistoryPath(ctxRoot))).toBe(true);
     const onDisk = JSON.parse(readFileSync(cronDispatchHistoryPath(ctxRoot), 'utf-8'));
     expect(onDisk.lastAlertAt).toBeTruthy();
@@ -273,7 +273,7 @@ describe('recordAndMaybeEscalate', () => {
 
   it('survives a corrupt history file and starts fresh', () => {
     writeFileSync(cronDispatchHistoryPath(ctxRoot), 'not valid json', 'utf-8');
-    const r1 = recordAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
+    const r1 = recordCronDispatchAndMaybeEscalate(ctxRoot, frameworkRoot, 'boss', 'a');
     expect(r1.escalated).toBe(false);
     expect(r1.history.events.length).toBe(1);
   });

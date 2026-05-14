@@ -24,7 +24,7 @@ import { collectTelegramCommands, registerTelegramCommands } from '../bus/metric
 import { stripControlChars } from '../utils/validate.js';
 import { processMediaMessage } from '../telegram/media.js';
 import { recordAndMaybeEscalate as recordSpawnFailureAndMaybeEscalate } from './spawn-failure-tracker.js';
-import { recordAndMaybeEscalate as recordCronDispatchAndMaybeEscalate } from './cron-dispatch-tracker.js';
+import { recordCronDispatchAndMaybeEscalate } from './cron-dispatch-tracker.js';
 
 type LogFn = (msg: string) => void;
 
