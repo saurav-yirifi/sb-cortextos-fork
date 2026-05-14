@@ -459,6 +459,9 @@ describe('runAudit end-to-end', () => {
 
     const second = runAudit({ since, ctxRoot, org: '' });
     expect(second.error).toBeNull();
+    // The second run must actually re-detect the same anomalies — otherwise
+    // the dedup-count assertion below would pass vacuously.
+    expect(second.anomalies.length).toBeGreaterThan(0);
     const until = new Date();
 
     const store = getStorePaths(ctxRoot, '');
