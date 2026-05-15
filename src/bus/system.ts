@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync, appendFileSync, writeFileSync } fro
 import { join, extname } from 'path';
 import { readdirSync } from 'fs';
 import { ensureDir } from '../utils/atomic.js';
+import { logEvent } from './event.js';
 import { TelegramAPI } from '../telegram/api.js';
 import type { BusPaths } from '../types/index.js';
 
@@ -80,12 +81,22 @@ export function selfRestart(paths: BusPaths, agentName: string, reason?: string)
  * on fast back-to-back unrelated dispatches. Context-overflow restarts
  * (FastChecker Tier-2/3) MUST NOT pass freshStart=true — those are not
  * dispatch-driven and shouldn't consume the cooldown window.
+ *
+ * Measurement-gap-fix Gap 1 (2026-05-15): when `freshStart=true` AND
+ * `org` is provided, emit a structured `action/fresh_restart_executed`
+ * JSONL event with `meta.dispatch_msg_id` set to `dispatchMsgId` (or
+ * null when the operator/agent called bus hard-restart by hand). The
+ * event closes the analyst's dispatch→hardRestart→fresh-session
+ * correlation gap. Context-overflow restarts emit no event because
+ * they don't pass freshStart=true.
  */
 export function hardRestart(
   paths: BusPaths,
   agentName: string,
   reason?: string,
   freshStart?: boolean,
+  org?: string,
+  dispatchMsgId?: string,
 ): void {
   const resolvedReason = reason || 'no reason specified';
 
@@ -112,6 +123,25 @@ export function hardRestart(
       timestamp + '\n',
       'utf-8',
     );
+
+    // measurement-gap-fix Gap 1: emit the JSONL event. `org` is required
+    // because logEvent writes under {analyticsDir}/events/{agent}/ and the
+    // analyst reads events keyed by (agent, org). Callers that can't pass
+    // org (legacy tests, fast-checker context-overflow path) get the
+    // restart but no event — that's the documented backwards-compat
+    // contract.
+    if (org !== undefined) {
+      try {
+        logEvent(paths, agentName, org, 'action', 'fresh_restart_executed', 'info', {
+          agent: agentName,
+          reason: resolvedReason,
+          dispatch_msg_id: dispatchMsgId ?? null,
+        });
+      } catch {
+        // Best-effort telemetry — a failing event write must not block
+        // the restart itself. The force-fresh marker is already on disk.
+      }
+    }
   }
 }
 
