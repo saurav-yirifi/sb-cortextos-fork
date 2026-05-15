@@ -155,7 +155,7 @@ export function installSelfHealing(
   const launchAgentsDir = opts.launchAgentsDir ?? defaultLaunchAgentsDir(home);
   const skipLaunchctl = opts.skipLaunchctl ?? false;
   // Cache uid once per install — `id -u` is invariant for a given process and
-  // we hit launchctl 4× across the loop.
+  // we hit launchctl once per service across the loop.
   const uid = getUid();
 
   // Stage 1: copy shell scripts to <ctxRoot>/scripts/. Must complete BEFORE

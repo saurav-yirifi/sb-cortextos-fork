@@ -97,7 +97,7 @@ All thresholds live at the top of each script as shell variables — open the sc
 
 ### `payload-cap-drift.sh`
 - `PAYLOAD_CAP_TOKENS` (default `15000`) — per-agent combined CLAUDE.md + MEMORY.md + HEARTBEAT.md cap. Approximates tokens as `bytes / 4`; well within the noise floor of the cap.
-- Schedule: daily at 09:00 local (`StartCalendarInterval` in the plist). `RunAtLoad: false` — install does not trigger an immediate fire. Edit the plist after install to change cadence (weekly: replace with `<key>StartCalendarInterval</key>` + `Weekday`).
+- Schedule: daily at 09:00 local (`StartCalendarInterval` with `Hour: 9, Minute: 0` in the plist). `RunAtLoad: false` — install does not trigger an immediate fire. To switch to weekly, add a `Weekday` key (0–6, Sunday=0) inside the `StartCalendarInterval` dict alongside `Hour` and `Minute` — all three keys must remain or launchd defaults to midnight.
 - Idempotency state: `~/.cortextos/<instance>/payload-cap-state.tsv`. Delete to re-arm — next breach run will alert again.
 
 ## Caveats
