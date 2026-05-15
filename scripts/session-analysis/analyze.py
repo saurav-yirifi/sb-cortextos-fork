@@ -474,8 +474,11 @@ def _git_branch_window(branch: str, base_branch: str = "main") -> tuple[datetime
                 # INTO base (not internal branch merges).
                 try:
                     merge = subprocess.run(
+                        # --fixed-strings: treat <branch> as a literal so names
+                        # containing regex metacharacters (e.g. fix/1.2.3) don't
+                        # over-match unrelated merges.
                         ["git", "log", base, "--merges", "--first-parent",
-                         f"--grep={branch}", "--format=%H", "-n", "1"],
+                         "--fixed-strings", f"--grep={branch}", "--format=%H", "-n", "1"],
                         capture_output=True, text=True, check=True, timeout=10,
                     ).stdout.strip()
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
@@ -525,8 +528,20 @@ def cmd_feature(args):
 
     base = Path.home() / ".claude" / "projects"
     if not base.exists():
-        msg = "[]" if args.format == "json" else "(no ~/.claude/projects)"
-        print(msg, file=sys.stderr)
+        if args.format == "json":
+            print(json.dumps({
+                "branch": branch,
+                "window": {
+                    "start": win_start.isoformat(),
+                    "end": win_end.isoformat(),
+                    "buffer_hours": args.window_hours,
+                },
+                "sessions": [],
+                "total": {"sessions": 0, "turns": 0, "tokens": 0, "usd": 0.0,
+                          "cache_read": 0, "cache_create": 0, "input": 0, "output": 0},
+            }))
+        else:
+            print("(no ~/.claude/projects)", file=sys.stderr)
         return 0
 
     matches = []
@@ -570,14 +585,18 @@ def cmd_feature(args):
             })
 
     matches.sort(key=lambda s: -s["total"])
-    matches = matches[: args.limit]
+    total_found = len(matches)
 
+    # TOTAL must reflect ALL matched sessions, not just the --limit display
+    # window — otherwise the headline cost is silently wrong.
     grand = Counter()
     for s in matches:
         for k in ("in", "out", "cc", "cr", "cc_5m", "cc_1h", "turns"):
             grand[k] += s[k]
     grand_total = grand["in"] + grand["out"] + grand["cc"] + grand["cr"]
     grand_usd = dollars(grand["in"], grand["out"], grand["cc_5m"], grand["cc_1h"], grand["cr"])
+
+    shown = matches[: args.limit]
 
     if args.format == "json":
         print(json.dumps({
@@ -587,9 +606,10 @@ def cmd_feature(args):
                 "end": win_end.isoformat(),
                 "buffer_hours": args.window_hours,
             },
-            "sessions": matches,
+            "sessions": shown,
             "total": {
-                "sessions": len(matches),
+                "sessions": total_found,
+                "sessions_shown": len(shown),
                 "turns": grand["turns"],
                 "tokens": grand_total,
                 "usd": grand_usd,
@@ -603,13 +623,16 @@ def cmd_feature(args):
 
     print(f"Feature: {branch}")
     print(f"Window:  {win_start.isoformat()} → {win_end.isoformat()}  (±{args.window_hours}h buffer)")
-    print(f"Matched: {len(matches)} session(s)")
+    if total_found > len(shown):
+        print(f"Matched: {total_found} session(s), showing top {len(shown)} by tokens")
+    else:
+        print(f"Matched: {total_found} session(s)")
     print()
     hdr = (f"{'session':36s} {'agent':18s} {'match':12s} {'first':19s} "
            f"{'turns':>5s} {'total':>8s} {'cr':>8s} {'cc':>7s} {'out':>7s} {'usd':>8s}")
     print(hdr)
     print("-" * len(hdr))
-    for s in matches:
+    for s in shown:
         agent = (s["agent"] or "-")[:18]
         print(
             f"{s['session_id']:36s} {agent:18s} {s['match']:12s} "
