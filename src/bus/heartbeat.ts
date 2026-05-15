@@ -86,6 +86,37 @@ function computeTaskStartedAt(paths: BusPaths, newCurrentTask: string, fallbackT
 }
 
 /**
+ * Path B watchdog wiring: stamp `current_task` on the agent's heartbeat
+ * non-destructively, preserving the prior status / org / displayName /
+ * loop_interval. Used by task-lifecycle bus commands (claim-task,
+ * complete-task, update-task) so the field that Path B's watcher reads
+ * actually gets populated as agents pick up and finish work. Pass
+ * `newTask=''` to clear (task complete / cancelled).
+ *
+ * No-op when the agent has no prior heartbeat (first call wins on next
+ * full update-heartbeat); we deliberately don't synthesize a heartbeat
+ * here because we lack the timezone the agent was configured with.
+ */
+export function setHeartbeatCurrentTask(
+  paths: BusPaths,
+  agentName: string,
+  newTask: string,
+): void {
+  let prior: Heartbeat | undefined;
+  try {
+    prior = JSON.parse(readFileSync(join(paths.stateDir, 'heartbeat.json'), 'utf-8')) as Heartbeat;
+  } catch {
+    return; // No prior heartbeat — skip silently; agent's next explicit update-heartbeat will set the field.
+  }
+  updateHeartbeat(paths, agentName, prior.status, {
+    org: prior.org,
+    currentTask: newTask,
+    displayName: prior.display_name,
+    loopInterval: prior.loop_interval,
+  });
+}
+
+/**
  * Detect day/night mode based on timezone.
  * Day: 8:00 - 22:00, Night: 22:00 - 8:00
  */

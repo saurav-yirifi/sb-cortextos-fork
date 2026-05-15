@@ -13,10 +13,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { updateHeartbeat } from '../../../src/bus/heartbeat';
+import { updateHeartbeat, setHeartbeatCurrentTask } from '../../../src/bus/heartbeat';
 import type { BusPaths, Heartbeat } from '../../../src/types';
 
 function makePaths(testDir: string, agent: string = 'test-agent'): BusPaths {
@@ -141,5 +141,68 @@ describe('updateHeartbeat — task_started_at (Path B Phase 1)', () => {
     const hb = readHeartbeat(paths);
     expect(hb.task_started_at).toBe('2026-05-15T20:00:00Z');
     expect(hb.last_heartbeat).toBe('2026-05-15T20:00:00Z');
+  });
+});
+
+describe('setHeartbeatCurrentTask — Path B writer wiring', () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = mkdtempSync(join(tmpdir(), 'cortextos-hb-task-test-'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-15T20:00:00Z'));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('is a no-op when no prior heartbeat exists', () => {
+    const paths = makePaths(testDir);
+    setHeartbeatCurrentTask(paths, 'test-agent', 'task-A');
+    // No prior → we don't synthesize one (timezone unknown). File not created.
+    expect(existsSync(join(paths.stateDir, 'heartbeat.json'))).toBe(false);
+  });
+
+  it('stamps current_task + task_started_at on the prior heartbeat', () => {
+    const paths = makePaths(testDir);
+    updateHeartbeat(paths, 'test-agent', 'online', { org: 'acme' });
+    expect(readHeartbeat(paths).current_task).toBe('');
+
+    vi.advanceTimersByTime(60_000);
+    setHeartbeatCurrentTask(paths, 'test-agent', 'task_1778881_xyz');
+    const hb = readHeartbeat(paths);
+    expect(hb.current_task).toBe('task_1778881_xyz');
+    expect(hb.task_started_at).toBe('2026-05-15T20:01:00Z');
+    // Status is preserved from the prior heartbeat.
+    expect(hb.status).toBe('online');
+    expect(hb.org).toBe('acme');
+  });
+
+  it('clears current_task + task_started_at when newTask is empty', () => {
+    const paths = makePaths(testDir);
+    updateHeartbeat(paths, 'test-agent', 'online', { org: 'acme', currentTask: 'task-A' });
+    expect(readHeartbeat(paths).current_task).toBe('task-A');
+
+    vi.advanceTimersByTime(60_000);
+    setHeartbeatCurrentTask(paths, 'test-agent', '');
+    const hb = readHeartbeat(paths);
+    expect(hb.current_task).toBe('');
+    expect(hb.task_started_at).toBeNull();
+  });
+
+  it('re-stamps task_started_at when transitioning between distinct tasks', () => {
+    const paths = makePaths(testDir);
+    setHeartbeatCurrentTask(paths, 'test-agent', 'task-A'); // no-op (no prior)
+    updateHeartbeat(paths, 'test-agent', 'online', { org: 'acme', currentTask: 'task-A' });
+    const stampedA = readHeartbeat(paths).task_started_at;
+
+    vi.advanceTimersByTime(5 * 60_000);
+    setHeartbeatCurrentTask(paths, 'test-agent', 'task-B');
+    const hb = readHeartbeat(paths);
+    expect(hb.current_task).toBe('task-B');
+    expect(hb.task_started_at).not.toBe(stampedA);
+    expect(hb.task_started_at).toBe('2026-05-15T20:05:00Z');
   });
 });

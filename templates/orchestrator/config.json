@@ -7,6 +7,7 @@
   "max_session_seconds": 28800,
   "max_crashes_per_day": 10,
   "heartbeat_stale_threshold_minutes": 10,
+  "task_stuck_threshold_minutes": 30,
   "working_directory": "",
   "timezone": "",
   "day_mode_start": "",
@@ -27,7 +28,7 @@
       "name": "check-approvals",
       "type": "recurring",
       "interval": "2h",
-      "prompt": "Check for pending approvals and human tasks. (1) cortextos bus list-approvals --format json — for any pending approval older than 1h, send user a Telegram reminder. (2) cortextos bus list-tasks --project human-tasks --status pending — for any [HUMAN] task pending >4h, send user a Telegram reminder with the task title and what's blocked. ACK any approval/human-task inbox messages."
+      "prompt": "Check for pending approvals and human tasks. (1) cortextos bus list-approvals --format json \u2014 for any pending approval older than 1h, send user a Telegram reminder. (2) cortextos bus list-tasks --project human-tasks --status pending \u2014 for any [HUMAN] task pending >4h, send user a Telegram reminder with the task title and what's blocked. ACK any approval/human-task inbox messages."
     },
     {
       "name": "morning-review",
@@ -49,7 +50,9 @@
     }
   ],
   "ecosystem": {
-    "local_version_control": { "enabled": true }
+    "local_version_control": {
+      "enabled": true
+    }
   },
   "ctx_warning_threshold": 70,
   "ctx_handoff_threshold": 80
