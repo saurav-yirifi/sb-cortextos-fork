@@ -296,6 +296,67 @@ describe('HeartbeatStalenessWatcher — fleet-resilience cleanup A (daemon JSONL
     expect(typeof rows[1].metadata.was_stale_for_seconds).toBe('number');
   });
 
+  it('idle-suppress: empty current_task past threshold → no alert, idle_suppressed event, lastAlertAt unchanged', () => {
+    const w = makeJsonlWatcher();
+    writeHeartbeat(11 * 60_000, ''); // 11 min stale, but agent is idle
+    w.tick();
+
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+    expect(w.isStale).toBe(false); // staleSince untouched on suppression
+
+    const rows = readDaemonEvents();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].event).toBe('heartbeat_idle_suppressed');
+    expect(rows[0].metadata).toMatchObject({ agent: AGENT });
+    expect(typeof rows[0].metadata.age_seconds).toBe('number');
+    expect(typeof rows[0].metadata.threshold_seconds).toBe('number');
+  });
+
+  it('idle→active transition: suppressed while idle, then alert fires when task is assigned and still stale', () => {
+    const w = makeJsonlWatcher();
+    writeHeartbeat(11 * 60_000, ''); // idle + stale
+    w.tick();
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+
+    // Task now assigned; heartbeat still stale (cron hasn't fired yet).
+    writeHeartbeat(11 * 60_000, 'working on Y');
+    w.tick();
+    expect(spawnSyncMock).toHaveBeenCalledOnce();
+
+    const rows = readDaemonEvents();
+    // First tick wrote idle_suppressed; second wrote stale_detected.
+    expect(rows.map((r) => r.event)).toEqual([
+      'heartbeat_idle_suppressed',
+      'heartbeat_stale_detected',
+    ]);
+  });
+
+  it('idle-suppress is local to the suppression path: a non-empty task agent still alerts at threshold (regression lock)', () => {
+    const w = makeJsonlWatcher();
+    writeHeartbeat(11 * 60_000, 'compiling shaders');
+    w.tick();
+    expect(spawnSyncMock).toHaveBeenCalledOnce();
+    expect(w.isStale).toBe(true);
+  });
+
+  it('idle-suppress does not block recovery: agent with task goes stale, then heartbeat refreshes → recovered fires', () => {
+    const w = makeJsonlWatcher();
+    writeHeartbeat(11 * 60_000, 'busy');
+    w.tick();
+    expect(spawnSyncMock).toHaveBeenCalledOnce();
+
+    advance(2 * 60_000);
+    writeHeartbeat(0, 'busy');
+    w.tick();
+    expect(w.isStale).toBe(false);
+
+    const rows = readDaemonEvents();
+    expect(rows.map((r) => r.event)).toEqual([
+      'heartbeat_stale_detected',
+      'heartbeat_recovered',
+    ]);
+  });
+
   it('without instanceId+org, falls back to stderr-only (no JSONL row written)', () => {
     const w = new HeartbeatStalenessWatcher({
       agentName: AGENT,
