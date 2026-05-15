@@ -125,6 +125,11 @@ Unblocks quantitative verification of Tier 1.3 / 1.4 / 5.1 claims.
 
 **Verification:** pick one recent shipped BL, run `analyze.py feature <branch>`; output should be 4-6× the main-dir-only `summary`.
 
+**Observed (2026-05-15, PRs #58/#63/#64):** ratios vary by feature shape:
+- PR #58 (`fix/watchdog-idle-suppress`, mostly engineer-side): feature TOTAL ~$1,624 vs engineer-cwd session $52 ≈ **31×**.
+- PR #64 (`feat/payload-cap-drift`, multi-agent): feature TOTAL ~$879 vs main-cwd contributing sessions $276 ≈ **3.2×**.
+- The ±2h time-window catches concurrent activity in unrelated cwds (e.g. jarvis sessions matched via overlap, not branch-tag). The `branch-tag` matches are the precise signal; `time-window` matches are an upper bound. Operator filters by `project_dir` in JSON output to refine.
+
 ### Tier 4 — Compaction boundary signal (heartbeat-time, Issue 01 item 1 / Issue 06 item 1)
 
 Layered on top of Tier 1.1 (statusline = per-turn) — this is heartbeat-time = per-cycle.

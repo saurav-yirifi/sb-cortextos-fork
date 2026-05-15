@@ -12,9 +12,10 @@ import argparse
 import glob
 import json
 import os
+import subprocess
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Anthropic Opus 4.x list pricing (USD per 1M tokens) — keep in sync with
@@ -427,6 +428,204 @@ def cmd_recent_candidates(args):
     return 0
 
 
+# ----------------------------------------------------------------- feature ----
+
+def _git_log_iso(rev_range: str, *, timeout: int = 15) -> list[str] | None:
+    """Return `git log <rev_range> --format=%aI` lines (newest-first) or None."""
+    try:
+        out = subprocess.run(
+            ["git", "log", rev_range, "--format=%aI"],
+            capture_output=True, text=True, check=True, timeout=timeout,
+        ).stdout.strip().splitlines()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    return out or None
+
+
+def _git_branch_window(branch: str, base_branch: str = "main") -> tuple[datetime, datetime] | None:
+    """First + last author-date (UTC) of commits ON <branch> but NOT on <base_branch>.
+
+    Two strategies, tried in order:
+      1. `merge-base(base, branch)..branch` — works for unmerged branches and
+         for branches whose original commits were squashed into a single
+         unrelated commit on base.
+      2. `parent1..parent2` of the merge-commit on base that brought the
+         branch in — works for branches merged via merge-commit (where the
+         branch commits ARE reachable from base, so strategy 1 returns
+         empty). Identified by `--first-parent --grep=<branch>` on base.
+
+    Tries `<branch>` then `origin/<branch>` for the branch ref, and `main`
+    then `origin/main` for the base. Returns None if no strategy resolves.
+    """
+    for ref in (branch, f"origin/{branch}"):
+        for base in (base_branch, f"origin/{base_branch}"):
+            # Strategy 1: merge-base diff.
+            try:
+                mb = subprocess.run(
+                    ["git", "merge-base", base, ref],
+                    capture_output=True, text=True, check=True, timeout=10,
+                ).stdout.strip()
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                mb = ""
+            iso = _git_log_iso(f"{mb}..{ref}") if mb else None
+            if not iso:
+                # Strategy 2: find the merge commit on base that referenced
+                # this branch name. Use --first-parent so we only see merges
+                # INTO base (not internal branch merges).
+                try:
+                    merge = subprocess.run(
+                        ["git", "log", base, "--merges", "--first-parent",
+                         f"--grep={branch}", "--format=%H", "-n", "1"],
+                        capture_output=True, text=True, check=True, timeout=10,
+                    ).stdout.strip()
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                    merge = ""
+                if merge:
+                    try:
+                        parents = subprocess.run(
+                            ["git", "log", merge, "--format=%P", "-n", "1"],
+                            capture_output=True, text=True, check=True, timeout=10,
+                        ).stdout.strip().split()
+                    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+                        parents = []
+                    if len(parents) >= 2:
+                        iso = _git_log_iso(f"{parents[0]}..{parents[1]}")
+            if iso:
+                last = _parse_iso(iso[0])      # git log emits newest-first
+                first = _parse_iso(iso[-1])
+                if first is not None and last is not None:
+                    return first, last
+    return None
+
+
+def cmd_feature(args):
+    """Cross-session cost attribution for one branch.
+
+    Walks every ~/.claude/projects/<encoded-cwd>/ and matches sessions to
+    the given branch by:
+      (a) any assistant turn whose gitBranch == <branch> (preferred), OR
+      (b) session timestamp overlap with [first_commit - W, last_commit + W]
+          where W = --window-hours (default 2).
+
+    Emits one row per matched session (summary-subcommand schema) plus a
+    TOTAL row. The motivating gap: per-cwd `summary` only sees the main
+    agent's session; cross-session work (subagent sidechains, operator
+    sessions in different cwds, fullstack co-workers) is invisible. Spec:
+    docs_sb/plans/02-context-fix-plan.md Tier 3.
+    """
+    branch = args.branch
+    window = _git_branch_window(branch)
+    if window is None:
+        print(f"No git log for branch {branch} (tried local and origin/)", file=sys.stderr)
+        return 1
+    win_start, win_end = window
+    buf = timedelta(hours=args.window_hours)
+    win_start -= buf
+    win_end += buf
+
+    base = Path.home() / ".claude" / "projects"
+    if not base.exists():
+        msg = "[]" if args.format == "json" else "(no ~/.claude/projects)"
+        print(msg, file=sys.stderr)
+        return 0
+
+    matches = []
+    for proj_dir in sorted(base.iterdir()):
+        if not proj_dir.is_dir():
+            continue
+        for path in sorted(proj_dir.glob("*.jsonl")):
+            turns, agents = _load_session(path)
+            if not turns:
+                continue
+            branches = {t["branch"] for t in turns if t.get("branch")}
+            tagged = branch in branches
+            timestamps = [_parse_iso(t["ts"]) for t in turns if t.get("ts")]
+            timestamps = [ts for ts in timestamps if ts is not None]
+            in_window = False
+            if timestamps:
+                first_ts, last_ts = min(timestamps), max(timestamps)
+                in_window = last_ts >= win_start and first_ts <= win_end
+            if not (tagged or in_window):
+                continue
+            agg = Counter()
+            for t in turns:
+                for k in ("in", "out", "cc", "cr", "cc_5m", "cc_1h"):
+                    agg[k] += t[k]
+            total = agg["in"] + agg["out"] + agg["cc"] + agg["cr"]
+            usd = dollars(agg["in"], agg["out"], agg["cc_5m"], agg["cc_1h"], agg["cr"])
+            iso_times = [t["ts"] for t in turns if t.get("ts")]
+            matches.append({
+                "session_id": path.stem,
+                "project_dir": proj_dir.name,
+                "agent": (agents[-1] if agents else None) or _derive_agent_name(proj_dir.name),
+                "match": "branch-tag" if tagged else "time-window",
+                "first": min(iso_times) if iso_times else "",
+                "last": max(iso_times) if iso_times else "",
+                "branches": sorted(branches),
+                "turns": len(turns),
+                "in": agg["in"], "out": agg["out"], "cc": agg["cc"], "cr": agg["cr"],
+                "cc_5m": agg["cc_5m"], "cc_1h": agg["cc_1h"],
+                "total": total,
+                "usd": usd,
+            })
+
+    matches.sort(key=lambda s: -s["total"])
+    matches = matches[: args.limit]
+
+    grand = Counter()
+    for s in matches:
+        for k in ("in", "out", "cc", "cr", "cc_5m", "cc_1h", "turns"):
+            grand[k] += s[k]
+    grand_total = grand["in"] + grand["out"] + grand["cc"] + grand["cr"]
+    grand_usd = dollars(grand["in"], grand["out"], grand["cc_5m"], grand["cc_1h"], grand["cr"])
+
+    if args.format == "json":
+        print(json.dumps({
+            "branch": branch,
+            "window": {
+                "start": win_start.isoformat(),
+                "end": win_end.isoformat(),
+                "buffer_hours": args.window_hours,
+            },
+            "sessions": matches,
+            "total": {
+                "sessions": len(matches),
+                "turns": grand["turns"],
+                "tokens": grand_total,
+                "usd": grand_usd,
+                "cache_read": grand["cr"],
+                "cache_create": grand["cc"],
+                "input": grand["in"],
+                "output": grand["out"],
+            },
+        }, indent=2))
+        return 0
+
+    print(f"Feature: {branch}")
+    print(f"Window:  {win_start.isoformat()} → {win_end.isoformat()}  (±{args.window_hours}h buffer)")
+    print(f"Matched: {len(matches)} session(s)")
+    print()
+    hdr = (f"{'session':36s} {'agent':18s} {'match':12s} {'first':19s} "
+           f"{'turns':>5s} {'total':>8s} {'cr':>8s} {'cc':>7s} {'out':>7s} {'usd':>8s}")
+    print(hdr)
+    print("-" * len(hdr))
+    for s in matches:
+        agent = (s["agent"] or "-")[:18]
+        print(
+            f"{s['session_id']:36s} {agent:18s} {s['match']:12s} "
+            f"{(s['first'] or '')[:19]:19s} {s['turns']:>5d} {human(s['total']):>8s} "
+            f"{human(s['cr']):>8s} {human(s['cc']):>7s} {human(s['out']):>7s} "
+            f"${s['usd']:>7,.2f}"
+        )
+    print("-" * len(hdr))
+    print(
+        f"{'TOTAL':36s} {'-':18s} {'-':12s} {'-':19s} "
+        f"{grand['turns']:>5d} {human(grand_total):>8s} {human(grand['cr']):>8s} "
+        f"{human(grand['cc']):>7s} {human(grand['out']):>7s} ${grand_usd:>7,.2f}"
+    )
+    return 0
+
+
 # ---------------------------------------------------------------- projects ----
 
 def cmd_projects(args):
@@ -491,6 +690,19 @@ def build_parser():
     sp.add_argument("--format", choices=("text", "json"), default="text",
                     help="Output format (default text; json for cron consumption)")
     sp.set_defaults(func=cmd_recent_candidates)
+
+    sp = sub.add_parser(
+        "feature",
+        help="Cross-session cost attribution for a branch (walks all ~/.claude/projects/, matches by gitBranch tag or git-log time-window)",
+    )
+    sp.add_argument("branch", help="Git branch name (e.g. fix/watchdog-idle-suppress)")
+    sp.add_argument("--window-hours", type=int, default=2,
+                    help="±buffer around first/last commit on the branch (default 2)")
+    sp.add_argument("--format", choices=("text", "json"), default="text",
+                    help="Output format (default text)")
+    sp.add_argument("--limit", type=int, default=20,
+                    help="Max sessions to include (default 20, ranked by total tokens)")
+    sp.set_defaults(func=cmd_feature)
 
     sp = sub.add_parser("projects", help="Compare token spend across ALL ~/.claude/projects/")
     sp.add_argument("--limit", type=int, default=20)
