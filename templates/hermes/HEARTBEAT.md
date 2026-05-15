@@ -51,7 +51,7 @@ cortextos bus context-update
 cat "$CTX_ROOT/state/$CTX_AGENT_NAME/context-pct.json" | jq '{pct, severity, current_loaded_tokens, context_limit, model}'
 ```
 
-Severity → action (full reference: `.claude/rules/code-quality/compact-instructions.md`):
+Severity → action:
 
 - `green` — no action
 - `soft` — log a heartbeat note that context is elevated; no autonomous action

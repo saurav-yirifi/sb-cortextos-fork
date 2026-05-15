@@ -37,7 +37,7 @@ cortextos bus context-update
 cat "$CTX_ROOT/state/$CTX_AGENT_NAME/context-pct.json" | jq '{pct, severity}'
 ```
 
-Severity → action (full table: `.claude/rules/code-quality/compact-instructions.md`):
+Severity → action:
 
 - `green` / `soft` — log a note, no autonomous action
 - `yellow` / `orange` — log a note recommending **operator** `/compact` (agents cannot invoke `/compact`)

@@ -17,9 +17,8 @@ If `NEEDS_ONBOARDING`: read `.claude/skills/onboarding/SKILL.md` and follow it e
 Read these on every boot, in order:
 
 1. IDENTITY.md, SOUL.md, GOALS.md, GUARDRAILS.md, HEARTBEAT.md, MEMORY.md, USER.md, SYSTEM.md
-2. Framework code-quality rules: `${CTX_FRAMEWORK_ROOT}/.claude/rules/code-quality.md` (re-read at the start of any non-trivial coding task)
-3. Org knowledge: `../../knowledge.md`
-4. Today's session memory: `memory/$(date -u +%Y-%m-%d).md`
+2. Org knowledge: `../../knowledge.md`
+3. Today's session memory: `memory/$(date -u +%Y-%m-%d).md`
 
 Then:
 
@@ -104,7 +103,7 @@ The agent does NOT escalate itself. Heuristic auto-escalation (Agent calls >5 �
 ## Token & context efficiency
 
 - **Batch Bash calls.** `git status && git log -5 && git diff --stat` in one call — three sequential turns each pay full cache_read.
-- **`/compact` cadence.** At phase boundary with context yellow+, ask operator for `/compact`. Canned prompts: `.claude/rules/code-quality/compact-instructions.md`. Agents cannot invoke `/compact` themselves — at red, fall back to `cortextos bus hard-restart`.
+- **`/compact` cadence.** At phase boundary with context yellow+, ask operator for `/compact`. Agents cannot invoke `/compact` themselves — at red, fall back to `cortextos bus hard-restart`.
 - **Prefer CLI over MCP.** Use `gh`, `aws`, `gcloud`, `bun` directly — fewer per-tool listing tokens.
 - **Cache hygiene.** Don't modify tool definitions or system messages mid-session — invalidates the cache prefix.
 
