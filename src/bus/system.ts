@@ -124,22 +124,28 @@ export function hardRestart(
       'utf-8',
     );
 
-    // measurement-gap-fix Gap 1: emit the JSONL event. `org` is required
-    // because logEvent writes under {analyticsDir}/events/{agent}/ and the
-    // analyst reads events keyed by (agent, org). Callers that can't pass
-    // org (legacy tests, fast-checker context-overflow path) get the
-    // restart but no event — that's the documented backwards-compat
-    // contract.
-    if (org !== undefined) {
+    // measurement-gap-fix Gap 1: emit the JSONL event. Need a non-empty
+    // org because logEvent writes under {analyticsDir}/events/{agent}/
+    // and the analyst keys events by (agent, org). `resolveEnv()` returns
+    // `org = ''` when CTX_ORG is unset, so check truthiness (not just
+    // `!== undefined`) to also reject the empty-string case. Callers
+    // without a usable org (legacy tests, fast-checker context-overflow
+    // path) get the restart but no event — documented backwards-compat.
+    if (org) {
       try {
         logEvent(paths, agentName, org, 'action', 'fresh_restart_executed', 'info', {
           agent: agentName,
           reason: resolvedReason,
           dispatch_msg_id: dispatchMsgId ?? null,
         });
-      } catch {
+      } catch (err) {
         // Best-effort telemetry — a failing event write must not block
-        // the restart itself. The force-fresh marker is already on disk.
+        // the restart itself. Surface to stderr so the failure is at
+        // least observable to whoever is reading daemon logs.
+        const msg = err instanceof Error ? err.message : String(err);
+        process.stderr.write(
+          `[hardRestart] fresh_restart_executed event write failed for ${agentName}: ${msg}\n`,
+        );
       }
     }
   }

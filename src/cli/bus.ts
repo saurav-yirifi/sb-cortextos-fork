@@ -692,6 +692,12 @@ busCommand
     const { writeFileSync: fsWrite, existsSync: fsExists, mkdirSync: fsMkdir } = require('fs');
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    if (opts.dispatchMsgId && !opts.freshStart) {
+      process.stderr.write(
+        '[hard-restart] --dispatch-msg-id ignored because --fresh-start was not passed; ' +
+        'no fresh_restart_executed event will be emitted (context-overflow restart path).\n',
+      );
+    }
     hardRestart(paths, env.agentName, opts.reason, opts.freshStart, env.org, opts.dispatchMsgId);
     if (opts.handoffDoc && fsExists(opts.handoffDoc)) {
       fsMkdir(paths.stateDir, { recursive: true });

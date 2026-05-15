@@ -134,10 +134,9 @@ describe('Bus System', () => {
       expect(match.category).toBe('action');
       expect(match.severity).toBe('info');
       expect(match.org).toBe('sb-personal');
-      const meta = match.metadata ?? match.meta;
-      expect(meta.agent).toBe('test-agent');
-      expect(meta.reason).toBe('fresh-start for task-X');
-      expect(meta.dispatch_msg_id).toBe('msg-abc-123');
+      expect(match.metadata.agent).toBe('test-agent');
+      expect(match.metadata.reason).toBe('fresh-start for task-X');
+      expect(match.metadata.dispatch_msg_id).toBe('msg-abc-123');
     });
 
     it('emits event with dispatch_msg_id=null when freshStart=true but no msg-id passed', () => {
@@ -146,8 +145,7 @@ describe('Bus System', () => {
       const events = readTodaysEvents(paths, 'test-agent');
       const match = events.find((e) => e.event === 'fresh_restart_executed');
       expect(match).toBeDefined();
-      const meta = match.metadata ?? match.meta;
-      expect(meta.dispatch_msg_id).toBeNull();
+      expect(match.metadata.dispatch_msg_id).toBeNull();
     });
 
     it('does NOT emit event when freshStart is omitted (context-overflow restart path)', () => {
@@ -170,6 +168,16 @@ describe('Bus System', () => {
       // Still writes the cooldown marker — restart path itself works.
       expect(existsSync(join(paths.stateDir, '.last-fresh-restart-at'))).toBe(true);
       // But no event because we can't key it without org.
+      const events = readTodaysEvents(paths, 'test-agent');
+      expect(events.find((e) => e.event === 'fresh_restart_executed')).toBeUndefined();
+    });
+
+    it('falls through silently when org=\'\' (resolveEnv default when CTX_ORG unset)', () => {
+      // resolveEnv returns org='' (not undefined) when CTX_ORG is unset, so
+      // a `!== undefined` guard would let it through and write a malformed
+      // event. Verify the truthy guard catches it.
+      const paths = makePaths(testDir);
+      hardRestart(paths, 'test-agent', 'fresh-start, empty org', true, '', 'msg-X');
       const events = readTodaysEvents(paths, 'test-agent');
       expect(events.find((e) => e.event === 'fresh_restart_executed')).toBeUndefined();
     });
