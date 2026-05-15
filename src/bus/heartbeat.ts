@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync } from 'fs';
+import { readdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import type { Heartbeat, BusPaths } from '../types/index.js';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
@@ -24,6 +24,10 @@ export function updateHeartbeat(
 ): void {
   ensureDir(paths.stateDir);
 
+  // Single-writer assumption: each agent owns its own heartbeat path and is
+  // the only writer (operator vs cron call sites all run inside the agent's
+  // own session). The read-modify-write below is not synchronised, but no
+  // concurrent writers exist by design.
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
   const mode = options?.timezone ? detectDayNightMode(options.timezone) : detectDayNightMode('UTC');
   const newCurrentTask = options?.currentTask ?? '';
@@ -55,24 +59,29 @@ export function updateHeartbeat(
 /**
  * Path B helper — derive task_started_at for the new heartbeat write.
  *
+ * `fallbackTs` is the timestamp string the caller will write as
+ * `last_heartbeat`; we reuse it when stamping a fresh transition so the two
+ * fields stay coherent on the first write but diverge thereafter as
+ * last_heartbeat ticks forward.
+ *
  * Rules:
  *   - newCurrentTask === ''           → null (no active task)
- *   - prior unreadable / first write  → `now` (treat as a transition)
- *   - prior.current_task !== new      → `now` (transition)
+ *   - prior unreadable / first write  → `fallbackTs` (treat as a transition)
+ *   - prior.current_task !== new      → `fallbackTs` (transition)
  *   - prior.current_task === new      → prior.task_started_at (preserve;
- *                                       fall back to `now` if prior didn't
- *                                       carry the field, e.g. older write)
+ *                                       fall back to `fallbackTs` if prior
+ *                                       didn't carry the field — legacy write)
  */
-function computeTaskStartedAt(paths: BusPaths, newCurrentTask: string, now: string): string | null {
+function computeTaskStartedAt(paths: BusPaths, newCurrentTask: string, fallbackTs: string): string | null {
   if (newCurrentTask === '') return null;
-  const hbPath = join(paths.stateDir, 'heartbeat.json');
-  if (!existsSync(hbPath)) return now;
+  // No existsSync precheck — TOCTOU window between the check and the read is
+  // narrow but real; the catch already handles ENOENT cleanly.
   try {
-    const prior = JSON.parse(readFileSync(hbPath, 'utf-8')) as Heartbeat;
-    if (prior.current_task !== newCurrentTask) return now;
-    return prior.task_started_at ?? now;
+    const prior = JSON.parse(readFileSync(join(paths.stateDir, 'heartbeat.json'), 'utf-8')) as Heartbeat;
+    if (prior.current_task !== newCurrentTask) return fallbackTs;
+    return prior.task_started_at ?? fallbackTs;
   } catch {
-    return now;
+    return fallbackTs;
   }
 }
 

@@ -12,7 +12,7 @@
  *     to confirm refreshHeartbeatTimestamp's JSON roundtrip carries the field)
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -43,9 +43,12 @@ describe('updateHeartbeat — task_started_at (Path B Phase 1)', () => {
 
   beforeEach(() => {
     testDir = mkdtempSync(join(tmpdir(), 'cortextos-hb-test-'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-05-15T20:00:00Z'));
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     rmSync(testDir, { recursive: true, force: true });
   });
 
@@ -63,66 +66,57 @@ describe('updateHeartbeat — task_started_at (Path B Phase 1)', () => {
 
   it('stamps task_started_at on first write with non-empty current_task', () => {
     const paths = makePaths(testDir);
-    const before = Date.now();
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: 'task-A' });
-    const after = Date.now();
     const hb = readHeartbeat(paths);
-    expect(hb.task_started_at).toBeTruthy();
-    const stampedMs = Date.parse(hb.task_started_at!);
-    expect(stampedMs).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000);
-    expect(stampedMs).toBeLessThanOrEqual(after + 1000);
-    // task_started_at should match last_heartbeat on a fresh stamp.
+    expect(hb.task_started_at).toBe('2026-05-15T20:00:00Z');
+    // On a fresh transition both fields share the same stamp; this equality
+    // only holds at stamp time, not as a general invariant (see preserve-test
+    // below where last_heartbeat ticks past task_started_at).
     expect(hb.task_started_at).toBe(hb.last_heartbeat);
   });
 
-  it('preserves task_started_at when current_task is unchanged across writes', async () => {
+  it('preserves task_started_at when current_task is unchanged across writes', () => {
     const paths = makePaths(testDir);
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: 'task-A' });
     const stamped = readHeartbeat(paths).task_started_at;
-    expect(stamped).toBeTruthy();
+    expect(stamped).toBe('2026-05-15T20:00:00Z');
 
-    // Wait a second to ensure ISO-second-resolution distinguishes the writes.
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-
+    vi.advanceTimersByTime(5 * 60_000); // +5 min
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: 'task-A' });
     const hb2 = readHeartbeat(paths);
-    expect(hb2.task_started_at).toBe(stamped);
-    // last_heartbeat should have advanced even though task_started_at did not.
-    expect(hb2.last_heartbeat).not.toBe(stamped);
+    expect(hb2.task_started_at).toBe(stamped); // preserved
+    expect(hb2.last_heartbeat).toBe('2026-05-15T20:05:00Z'); // advanced
+    expect(hb2.last_heartbeat).not.toBe(hb2.task_started_at);
   });
 
-  it('re-stamps task_started_at when current_task transitions to a different value', async () => {
+  it('re-stamps task_started_at when current_task transitions to a different value', () => {
     const paths = makePaths(testDir);
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: 'task-A' });
-    const stampedA = readHeartbeat(paths).task_started_at;
 
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-
+    vi.advanceTimersByTime(10 * 60_000); // +10 min
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: 'task-B' });
-    const stampedB = readHeartbeat(paths).task_started_at;
-    expect(stampedB).toBeTruthy();
-    expect(stampedB).not.toBe(stampedA);
+    const hb = readHeartbeat(paths);
+    expect(hb.task_started_at).toBe('2026-05-15T20:10:00Z');
   });
 
-  it('clears task_started_at to null on transition to empty current_task', async () => {
+  it('clears task_started_at to null on transition to empty current_task', () => {
     const paths = makePaths(testDir);
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: 'task-A' });
     expect(readHeartbeat(paths).task_started_at).toBeTruthy();
+
+    vi.advanceTimersByTime(60_000);
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: '' });
     expect(readHeartbeat(paths).task_started_at).toBeNull();
   });
 
-  it('re-stamps task_started_at on null → non-empty transition (idle → working)', async () => {
+  it('re-stamps task_started_at on null → non-empty transition (idle → working)', () => {
     const paths = makePaths(testDir);
     updateHeartbeat(paths, 'test-agent', 'online');
     expect(readHeartbeat(paths).task_started_at).toBeNull();
 
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    vi.advanceTimersByTime(30 * 60_000); // +30 min idle
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: 'task-A' });
-    const stamped = readHeartbeat(paths).task_started_at;
-    expect(stamped).toBeTruthy();
-    // Stamp should be after the null-state heartbeat.
-    expect(Date.parse(stamped!)).toBeGreaterThan(0);
+    expect(readHeartbeat(paths).task_started_at).toBe('2026-05-15T20:30:00Z');
   });
 
   it('treats a heartbeat written by an older version (no task_started_at) as a transition and stamps on next write', () => {
@@ -137,15 +131,15 @@ describe('updateHeartbeat — task_started_at (Path B Phase 1)', () => {
         status: 'online',
         current_task: 'task-A',
         mode: 'day',
-        last_heartbeat: '2026-05-15T20:00:00Z',
+        last_heartbeat: '2026-05-15T19:00:00Z',
         loop_interval: '',
       }),
     );
-    // Same current_task on next write — the helper falls back to `now` because
-    // the prior heartbeat didn't carry the field.
+    // Same current_task on next write — the helper falls back to fallbackTs
+    // because the prior heartbeat didn't carry the field.
     updateHeartbeat(paths, 'test-agent', 'online', { currentTask: 'task-A' });
     const hb = readHeartbeat(paths);
-    expect(hb.task_started_at).toBeTruthy();
-    expect(hb.task_started_at).toBe(hb.last_heartbeat);
+    expect(hb.task_started_at).toBe('2026-05-15T20:00:00Z');
+    expect(hb.last_heartbeat).toBe('2026-05-15T20:00:00Z');
   });
 });
