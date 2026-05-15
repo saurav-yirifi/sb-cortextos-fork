@@ -1,6 +1,13 @@
+import { createHash } from 'crypto';
 import { readHeartbeatStatus } from '../utils/agent-status.js';
 import { emitOperatorAlert } from './operator-alert.js';
 import { logDaemonEvent } from './daemon-event-logger.js';
+
+/** 8-char hash of an arbitrary string — used to keep per-task cooldown keys
+ * filesystem-safe (task names may contain spaces, slashes, special chars). */
+function shortHash(s: string): string {
+  return createHash('sha1').update(s).digest('hex').slice(0, 8);
+}
 
 // ---------------------------------------------------------------------------
 // Fleet-resilience plan #2 — daemon-side heartbeat-staleness watchdog.
@@ -310,13 +317,21 @@ export class HeartbeatStalenessWatcher {
       `hasn't moved.\n` +
       `Suggested: \`cortextos bus inject ${this.agentName} "ping?"\` to nudge`;
 
+    // Cooldown key includes a short hash of the task name so a per-task
+    // transition (wedged-A → wedged-B back-to-back) gets a fresh dedupe
+    // bucket. Without this, a long-cooldown bucket on `task_stuck-<agent>`
+    // would suppress a legitimate alert for a different stuck task. The
+    // watcher's own `lastTaskStuckAlertAt` already gates re-alerts on the
+    // SAME task at this.taskStuckRealertMs cadence; the cooldownMs below
+    // matches that and defends against a hypothetical future second
+    // emitter of `task_stuck` for the same (agent, task) pair.
     emitOperatorAlert(this.ctxRoot, this.frameworkRoot, {
       kind: 'task_stuck',
       severity: 'CRITICAL',
       agent: this.agentName,
       text: message,
-      cooldownKey: `task_stuck-${this.agentName}`,
-      cooldownMs: 1_000, // negligible — watcher.lastTaskStuckAlertAt gates re-alert
+      cooldownKey: `task_stuck-${this.agentName}-${shortHash(task)}`,
+      cooldownMs: this.taskStuckRealertMs,
     });
     this.lastTaskStuckAlertAt = nowMs;
     this.logger(

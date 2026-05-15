@@ -599,6 +599,47 @@ describe('HeartbeatStalenessWatcher — Path B task-stuck signal', () => {
     expect(detected!.metadata.threshold_seconds).toBe(30 * 60);
   });
 
+  it('handles back-to-back transitions where the new task is also immediately over-threshold', () => {
+    // Defensive test: agent transitions from one stuck task to another whose
+    // task_started_at is ALSO over-threshold (e.g. fast back-to-back wedges).
+    // Recovery emits for the old task, then flagTaskStuck fires for the new
+    // task in the SAME tick. Both Telegram alerts go out.
+    const w = makeTaskStuckWatcher({ taskStuckThresholdMs: 30 * 60_000, instanceId: 'test-instance', org: 'acme' });
+    writeHeartbeatWithTaskStart({ task: 'wedged-A', lastHeartbeatAgeMs: 60_000, taskStartedAgeMs: 45 * 60_000 });
+    w.tick();
+    expect(w.isTaskStuck).toBe(true);
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+
+    // New task, also already 45 min old at observation time.
+    advance(1_000);
+    writeHeartbeatWithTaskStart({ task: 'wedged-B', lastHeartbeatAgeMs: 60_000, taskStartedAgeMs: 45 * 60_000 });
+    w.tick();
+    expect(w.isTaskStuck).toBe(true);
+    const events = readDaemonEvents().map((r) => r.event);
+    expect(events).toContain('task_stuck_recovered'); // for wedged-A
+    expect(events.filter((e) => e === 'task_stuck_detected')).toHaveLength(2); // A + B
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips silently when task_started_at is a corrupt non-ISO string', () => {
+    const dir = join(ctxRoot, 'state', AGENT);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'heartbeat.json'), JSON.stringify({
+      agent: AGENT,
+      org: 'acme',
+      status: 'healthy',
+      current_task: 'task-A',
+      mode: 'day',
+      last_heartbeat: new Date(clock.ms - 60_000).toISOString(),
+      loop_interval: '5m',
+      task_started_at: 'not-a-date',
+    }));
+    const w = makeTaskStuckWatcher();
+    w.tick();
+    expect(w.isTaskStuck).toBe(false);
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+  });
+
   it('emits task_stuck_recovered when task transitions after a stuck alert', () => {
     const w = makeTaskStuckWatcher({ taskStuckThresholdMs: 30 * 60_000, instanceId: 'test-instance', org: 'acme' });
     writeHeartbeatWithTaskStart({ task: 'wedged', lastHeartbeatAgeMs: 60_000, taskStartedAgeMs: 45 * 60_000 });
