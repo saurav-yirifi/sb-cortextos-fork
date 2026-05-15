@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cortextos.payload-cap-drift</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{HOME}/.cortextos/{INSTANCE}/scripts/payload-cap-drift.sh</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{HOME}/.cortextos/{INSTANCE}/logs/payload-cap-drift.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{HOME}/.cortextos/{INSTANCE}/logs/payload-cap-drift.stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>CTX_INSTANCE_ID</key>
+        <string>{INSTANCE}</string>
+        <key>CTX_FRAMEWORK_ROOT</key>
+        <string>{HOME}/cortextos</string>
+    </dict>
+</dict>
+</plist>

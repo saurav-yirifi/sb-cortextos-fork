@@ -51,12 +51,13 @@ export interface InstallSelfHealingResult {
   failed: Array<{ name: string; reason: string }>;
 }
 
-/** The 4 launchd services we manage. Keep in lock-step with files on disk. */
+/** The 5 launchd services we manage. Keep in lock-step with files on disk. */
 export const SELF_HEALING_SERVICES = [
   'watchdog',
   'agent-recover',
   'usage-monitor',
   'compact-boundary-watcher',
+  'payload-cap-drift',
 ] as const;
 
 type ServiceName = (typeof SELF_HEALING_SERVICES)[number];
@@ -127,7 +128,7 @@ function renderPlist(templatePath: string, home: string, instance: string): stri
 }
 
 /**
- * Install + load all 4 self-healing services. On Linux returns immediately
+ * Install + load all 5 self-healing services. On Linux returns immediately
  * with `installed: []` so the flag is platform-uniform.
  */
 export function installSelfHealing(
@@ -159,8 +160,9 @@ export function installSelfHealing(
 
   // Stage 1: copy shell scripts to <ctxRoot>/scripts/. Must complete BEFORE
   // we write any plist, because the plists reference these scripts via
-  // ProgramArguments; a `RunAtLoad: true` job (which all four are) would
-  // fail its first invocation if the script weren't on disk yet.
+  // ProgramArguments; a `RunAtLoad: true` job (which most are; payload-cap-drift
+  // uses StartCalendarInterval and is RunAtLoad:false) would fail its first
+  // invocation if the script weren't on disk yet.
   const scriptsTarget = join(ctxRoot, 'scripts');
   mkdirSync(scriptsTarget, { recursive: true });
   for (const entry of readdirSync(sourceDir)) {
