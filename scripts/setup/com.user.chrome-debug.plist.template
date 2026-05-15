@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.chrome-debug</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{HOME}/Library/Application Support/com.user.chrome-debug/chrome-debug-launch.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{HOME}/Library/Logs/com.user.chrome-debug.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>{HOME}/Library/Logs/com.user.chrome-debug.stderr.log</string>
+</dict>
+</plist>
