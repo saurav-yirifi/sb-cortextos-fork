@@ -560,14 +560,24 @@ export class AgentProcess {
     //   - real silent crash → heartbeat went stale long before the exit → gate misses, real CRASH path runs
     // The gate intentionally requires BOTH exitCode=0 AND a fresh heartbeat;
     // either alone is insufficient.
-    if (exitCode === 0 && this.isWithinIdleExitWindow()) {
-      this.appendCrashToRestartsLog(exitCode, AgentProcess.IDLE_RESTART_BACKOFF_MS, 'IDLE-EXIT');
+    // Read heartbeat age ONCE so the gate decision and the IDLE-EXIT audit
+    // row reflect the same measurement — without this the row's hb_age_s
+    // can drift from the gate threshold under fs latency, which is confusing
+    // when forensically diagnosing why a particular exit was classified.
+    const hbAgeMs = exitCode === 0 ? this.heartbeatAgeMs() : Number.MAX_SAFE_INTEGER;
+    if (exitCode === 0 && hbAgeMs < AgentProcess.IDLE_EXIT_HEARTBEAT_GATE_MS) {
+      this.appendCrashToRestartsLog(exitCode, AgentProcess.IDLE_RESTART_BACKOFF_MS, 'IDLE-EXIT', undefined, hbAgeMs);
+      // status='stopped' (not a new 'idle-exited' literal) is deliberate:
+      // the Telegram subscriber in agent-manager.onStatusChanged only fires
+      // on 'crashed' and 'halted', and the heartbeat-staleness watcher only
+      // stops on 'halted', so 'stopped' threads the needle without expanding
+      // AgentStatus['status'] and cascading to every IPC consumer. The
+      // IDLE-EXIT row in restarts.log is the canonical operator-facing
+      // marker that distinguishes this path from a clean stop().
+      // (Spec line 18 originally proposed 'idle-exited' — divergence noted.)
       this.status = 'stopped';
       this.notifyStatusChange();
       // Brief restart so the agent is back online before the next cron tick.
-      // status='stopped' (not 'crashed') means the Telegram subscriber in
-      // agent-manager.onStatusChanged skips this transition entirely — no
-      // operator alert, no crash-budget bump, no recovery ping.
       setTimeout(() => {
         if (this.status === 'stopped' && !this.stopping && !this.stopRequested) {
           this.start().catch(err => this.log(`Idle-exit restart failed: ${err}`));
@@ -843,6 +853,7 @@ export class AgentProcess {
     backoffMs: number,
     kind: 'CRASH' | 'HALTED' | 'SPAWN-FAIL' | 'SPAWN-FAIL-HALTED' | 'IDLE-EXIT',
     errSignature?: string,
+    hbAgeMs?: number,
   ): void {
     try {
       const logDir = join(this.env.ctxRoot, 'logs', this.name);
@@ -857,8 +868,10 @@ export class AgentProcess {
         details = `crash_count=${this.crashCount} max_crashes=${this.maxCrashesPerDay} err=${errSignature ?? 'unknown'}`;
       } else if (kind === 'IDLE-EXIT') {
         // crash_count intentionally omitted — IDLE-EXIT does not bump the
-        // budget. hb_age_s is the load-bearing field for forensic analysis.
-        const hbAgeS = Math.floor(this.heartbeatAgeMs() / 1000);
+        // budget. hb_age_s is the load-bearing field for forensic analysis;
+        // pass it through from the gate decision to keep the row consistent
+        // with the threshold check (avoids a second fs read + clock drift).
+        const hbAgeS = Math.floor((hbAgeMs ?? this.heartbeatAgeMs()) / 1000);
         details = `exit_code=${exitCode} hb_age_s=${hbAgeS} backoff_s=${backoffMs / 1000}`;
       } else {
         details = `exit_code=${exitCode} crash_count=${this.crashCount} backoff_s=${backoffMs / 1000}`;
@@ -872,9 +885,10 @@ export class AgentProcess {
 
   /**
    * Read the agent's last heartbeat from disk and return its age in ms.
-   * Returns Number.MAX_SAFE_INTEGER if the heartbeat file is missing or
-   * unreadable — that classifies as "stale" for the idle-exit gate, which
-   * conservatively routes ambiguous cases through the original crash path.
+   * Returns Number.MAX_SAFE_INTEGER on a missing or unreadable heartbeat
+   * file — classifying ambiguous cases as "stale" so the idle-exit gate
+   * fails open into the original CRASH path rather than masking a real
+   * silent crash on an agent that never wrote a heartbeat.
    */
   private heartbeatAgeMs(): number {
     const status = readHeartbeatStatus(this.env.ctxRoot, this.name);
@@ -882,16 +896,6 @@ export class AgentProcess {
       return Number.MAX_SAFE_INTEGER;
     }
     return status.lastHeartbeatAgeSeconds * 1000;
-  }
-
-  /**
-   * Predicate for the idle-exit gate. `true` when the heartbeat was refreshed
-   * recently enough that we trust the exit was a clean idle/refresh exit
-   * rather than a silent crash. Pulled into its own method so tests can
-   * deterministically toggle the gate state.
-   */
-  private isWithinIdleExitWindow(): boolean {
-    return this.heartbeatAgeMs() < AgentProcess.IDLE_EXIT_HEARTBEAT_GATE_MS;
   }
 
   /**

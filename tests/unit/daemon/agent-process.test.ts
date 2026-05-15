@@ -303,10 +303,18 @@ describe('AgentProcess - idle-exit gate (theta-wave 2026-05-15)', () => {
     expect(ap.getStatus().crashCount ?? 0).toBe(0);
     // Audit row IS written so operators can still see every PTY exit, but
     // with kind=IDLE-EXIT so log scanners can distinguish from real crashes.
-    expect(fsMocks.appendFileSync).toHaveBeenCalledTimes(1);
-    const [logPath, logLine] = fsMocks.appendFileSync.mock.calls[0];
-    expect(String(logPath)).toContain('/logs/alice/restarts.log');
-    expect(String(logLine)).toMatch(/\] IDLE-EXIT: exit_code=0 hb_age_s=\d+ backoff_s=5\b/);
+    // Matching by-content (not by call count) keeps the test resilient if a
+    // future change adds a sibling write inside the IDLE-EXIT branch.
+    const idleRows = fsMocks.appendFileSync.mock.calls
+      .filter(([p]) => String(p).endsWith('/logs/alice/restarts.log'))
+      .map(([, line]) => String(line))
+      .filter(line => /\] IDLE-EXIT: exit_code=0 hb_age_s=\d+ backoff_s=5\b/.test(line));
+    expect(idleRows).toHaveLength(1);
+    // And NO CRASH row was written (the gate's whole point).
+    const crashRows = fsMocks.appendFileSync.mock.calls
+      .map(([, line]) => String(line))
+      .filter(line => /\] CRASH: /.test(line));
+    expect(crashRows).toEqual([]);
   });
 
   it('exitCode=0 + stale heartbeat → crash path (gate fails open — real CRASH)', async () => {
@@ -360,6 +368,31 @@ describe('AgentProcess - idle-exit gate (theta-wave 2026-05-15)', () => {
       .filter(line => /\] (CRASH|IDLE-EXIT): /.test(line));
     expect(writtenKinds).toEqual([]);
   }, 10000);
+
+  it('exit=0 + missing heartbeat file → CRASH path (gate fails open)', async () => {
+    // Load-bearing safety net: heartbeatAgeMs() returns MAX_SAFE_INTEGER when
+    // heartbeat.json is missing. Without this, an agent that crashed on its
+    // first cycle (before ever writing a heartbeat) would be silently swallowed
+    // by the gate. This test pins the fail-open contract that the JSDoc
+    // documents — if someone later "fixes" the missing-file case to return 0
+    // (looks fresh), real crashes get masked.
+    fsMocks.existsSync.mockReturnValue(false); // no heartbeat.json on disk
+
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+    capturedOnExit!(0, 0);
+
+    expect(ap.getStatus().status).toBe('crashed');
+    expect(ap.getStatus().crashCount).toBe(1);
+    const idleRows = fsMocks.appendFileSync.mock.calls
+      .map(([, line]) => String(line))
+      .filter(line => /\] IDLE-EXIT: /.test(line));
+    expect(idleRows).toEqual([]);
+    const crashRows = fsMocks.appendFileSync.mock.calls
+      .map(([, line]) => String(line))
+      .filter(line => /\] CRASH: exit_code=0/.test(line));
+    expect(crashRows).toHaveLength(1);
+  });
 });
 
 describe('AgentProcess - BUG-048 fix (session timer re-reads config)', () => {
