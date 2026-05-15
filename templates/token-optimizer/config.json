@@ -14,11 +14,7 @@
   "day_mode_end": "",
   "communication_style": "",
   "approval_rules": {
-    "always_ask": [
-      "edit-other-agent-config",
-      "edit-cron-schedule",
-      "remove-cron"
-    ],
+    "always_ask": ["edit-other-agent-config", "edit-cron-schedule", "remove-cron"],
     "never_ask": []
   },
   "crons": [
