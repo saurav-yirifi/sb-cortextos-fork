@@ -5,7 +5,7 @@ description: Shared-repo multi-agent contamination rules. Trigger before any git
 
 # Worktree discipline (shared-repo coordination)
 
-The framework repo at `$CTX_FRAMEWORK_ROOT` (and any sibling shared repos the agent operates on — e.g. `$CTX_JARVIS_ROOT`, resolved per-machine) are **shared working trees** — multiple agents and the user may be operating in them at any moment. Branch operations there silently corrupt other agents' uncommitted state. See `.claude/rules/code-quality/same-repo-multi-agent-checkout-contamination.md`.
+The framework repo at `$CTX_FRAMEWORK_ROOT` (and any sibling shared repos the agent operates on — e.g. `$CTX_JARVIS_ROOT`, resolved per-machine) are **shared working trees** — multiple agents and the user may be operating in them at any moment. Branch operations there silently corrupt other agents' uncommitted state.
 
 **Never edit, commit, or checkout feature branches in the canonical tree.** Use a per-agent worktree.
 

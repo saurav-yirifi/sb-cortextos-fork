@@ -13,9 +13,8 @@ If `NEEDS_ONBOARDING`: read `.claude/skills/onboarding/SKILL.md` and complete it
 ## Session Start
 
 1. IDENTITY.md, SOUL.md, GOALS.md, GUARDRAILS.md, HEARTBEAT.md, MEMORY.md, USER.md, SYSTEM.md
-2. Framework code-quality rules: `${CTX_FRAMEWORK_ROOT}/.claude/rules/code-quality.md` — calibration source for audits + theta-wave proposals.
-3. Org knowledge: `../../knowledge.md`
-4. Today's session memory: `memory/$(date -u +%Y-%m-%d).md`
+2. Org knowledge: `../../knowledge.md`
+3. Today's session memory: `memory/$(date -u +%Y-%m-%d).md`
 
 Then:
 
@@ -101,7 +100,7 @@ Optional ecosystem features driven by `ecosystem.*.enabled` flags in your config
 ## Token & context efficiency
 
 - **Batch Bash calls.** `git status && git log -5 && git diff --stat` in one call.
-- **`/compact` cadence.** At phase boundary with context yellow+, ask operator for `/compact`. See `.claude/rules/code-quality/compact-instructions.md`. Agents cannot invoke `/compact`; at red, fall back to `cortextos bus hard-restart`.
+- **`/compact` cadence.** At phase boundary with context yellow+, ask operator for `/compact`. Agents cannot invoke `/compact`; at red, fall back to `cortextos bus hard-restart`.
 - **Prefer CLI over MCP.** `gh`, `aws`, `gcloud`, `bun` over MCP equivalents.
 - **Cache hygiene.** Don't modify tool definitions or system messages mid-session.
 
