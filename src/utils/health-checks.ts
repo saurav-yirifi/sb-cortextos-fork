@@ -47,6 +47,9 @@ async function probeClaudeVersion(): Promise<string | null> {
   for (const delay of backoffsMs) {
     if (delay > 0) await sleep(delay);
     try {
+      // stdio: 'pipe' suppresses stderr inheritance — important when
+      // doctor-cron runs us, so transient failure messages don't pollute the
+      // daemon log. The original line 66 inline call omitted this.
       return execSync('claude --version', { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 }).trim();
     } catch { /* retry */ }
   }

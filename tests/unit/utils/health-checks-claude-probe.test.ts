@@ -38,10 +38,6 @@ afterEach(() => {
   rmSync(frameworkRoot, { recursive: true, force: true });
 });
 
-function isClaudeVersionCall(args: unknown[]): boolean {
-  return typeof args[0] === 'string' && args[0] === 'claude --version';
-}
-
 describe('runAllChecks — Claude CLI retry (doctor-cron false-positive fix)', () => {
   it('passes when the first probe attempt succeeds', async () => {
     execSyncMock.mockImplementation((cmd: string) => {
@@ -71,7 +67,12 @@ describe('runAllChecks — Claude CLI retry (doctor-cron false-positive fix)', (
     const cli = checks.find((c) => c.name === 'Claude Code CLI');
     expect(cli).toBeDefined();
     expect(cli!.status).toBe('pass');
+    expect(cli!.message).toBe('1.2.3');
     expect(claudeCalls).toBe(3);
+    // Shared probe — the late-success version string must also pass-flag auth.
+    const auth = checks.find((c) => c.name === 'Claude Code auth');
+    expect(auth).toBeDefined();
+    expect(auth!.status).toBe('pass');
   });
 
   it('fails after all 3 attempts exhaust', async () => {
