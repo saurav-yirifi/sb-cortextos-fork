@@ -339,6 +339,53 @@ describe('HeartbeatStalenessWatcher — fleet-resilience cleanup A (daemon JSONL
     expect(w.isStale).toBe(true);
   });
 
+  it('idle-suppress round-trip: stale→recovered→idle→active→stale resets lastAlertAt correctly across the cycle', () => {
+    const w = makeJsonlWatcher();
+
+    // Phase 1: agent with task goes stale → alert fires.
+    writeHeartbeat(11 * 60_000, 'phase-1-work');
+    w.tick();
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1);
+
+    // Phase 2: heartbeat refreshes → recovered. lastAlertAt resets to null.
+    advance(2 * 60_000);
+    writeHeartbeat(0, 'phase-1-work');
+    w.tick();
+    expect(w.isStale).toBe(false);
+
+    // Phase 3: agent goes idle (no task) + heartbeat goes stale again.
+    // Long advance to ensure realertMs has elapsed since the phase-1 alert.
+    advance(45 * 60_000);
+    writeHeartbeat(11 * 60_000, '');
+    w.tick();
+    expect(spawnSyncMock).toHaveBeenCalledTimes(1); // still just the phase-1 alert
+
+    // Phase 4: a task arrives while heartbeat is still stale. lastAlertAt was
+    // reset by recovered() in phase 2, so this fires immediately (not gated
+    // by leftover state from phase 1).
+    writeHeartbeat(11 * 60_000, 'phase-4-work');
+    w.tick();
+    expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+
+    const events = readDaemonEvents().map((r) => r.event);
+    expect(events).toEqual([
+      'heartbeat_stale_detected',
+      'heartbeat_recovered',
+      'heartbeat_idle_suppressed',
+      'heartbeat_stale_detected',
+    ]);
+  });
+
+  it('whitespace-only current_task is treated as idle (no alert, idle_suppressed emitted)', () => {
+    const w = makeJsonlWatcher();
+    writeHeartbeat(11 * 60_000, '   ');
+    w.tick();
+    expect(spawnSyncMock).not.toHaveBeenCalled();
+    const rows = readDaemonEvents();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].event).toBe('heartbeat_idle_suppressed');
+  });
+
   it('idle-suppress does not block recovery: agent with task goes stale, then heartbeat refreshes → recovered fires', () => {
     const w = makeJsonlWatcher();
     writeHeartbeat(11 * 60_000, 'busy');

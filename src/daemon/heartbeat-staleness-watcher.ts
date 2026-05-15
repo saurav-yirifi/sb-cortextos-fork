@@ -140,7 +140,7 @@ export class HeartbeatStalenessWatcher {
       // ticks. Alert only when current_task is non-empty (agent is supposed
       // to be working). Do not advance staleSince/lastAlertAt — the next tick
       // that finds a task assigned should treat this as a fresh transition.
-      if (!hb.lastHeartbeatTask) {
+      if (!hb.lastHeartbeatTask?.trim()) {
         this.emitIdleSuppressed(ageSeconds, thresholdSeconds);
         return;
       }
