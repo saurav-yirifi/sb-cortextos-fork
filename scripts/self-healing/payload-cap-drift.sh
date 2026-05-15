@@ -65,9 +65,11 @@ fi
 
 ALLOWED_CHAT_ID=""
 if [ -n "$ALERT_BOT_ENV" ] && [ -f "$ALERT_BOT_ENV" ]; then
-  # shellcheck disable=SC1090
-  set -a; . "$ALERT_BOT_ENV"; set +a
-  ALLOWED_CHAT_ID="${CTX_TELEGRAM_CHAT_ID:-${ALLOWED_USER:-}}"
+  # Targeted extraction — never `source` an untrusted .env (would let any key
+  # in the file override JQ_BIN / STATE_FILE / FRAMEWORK_ROOT etc.). Matches
+  # the compact-boundary-watcher.sh family convention.
+  ALLOWED_CHAT_ID=$(grep -E "^CTX_TELEGRAM_CHAT_ID=" "$ALERT_BOT_ENV" 2>/dev/null | cut -d= -f2 | tr -d '"'"'"'')
+  [ -z "$ALLOWED_CHAT_ID" ] && ALLOWED_CHAT_ID=$(grep -E "^ALLOWED_USER=" "$ALERT_BOT_ENV" 2>/dev/null | cut -d= -f2 | tr -d '"'"'"'')
 fi
 
 send_alert() {
@@ -80,7 +82,11 @@ send_alert() {
     return 0
   fi
   if [ -x "$FRAMEWORK_ROOT/scripts/comms/send-telegram-guarded.sh" ]; then
-    CTX_AGENT_NAME="payload-cap-drift" CTX_FRAMEWORK_ROOT="$FRAMEWORK_ROOT" \
+    # Pass INSTANCE through so guarded-send's dedupe cache lands under the
+    # right ~/.cortextos/<instance>/ for non-default deployments.
+    CTX_AGENT_NAME="payload-cap-drift" \
+      CTX_FRAMEWORK_ROOT="$FRAMEWORK_ROOT" \
+      CTX_INSTANCE_ID="$INSTANCE" \
       bash "$FRAMEWORK_ROOT/scripts/comms/send-telegram-guarded.sh" \
         "$ALLOWED_CHAT_ID" "$msg" >> "$LOG_FILE" 2>&1
   else
@@ -94,13 +100,25 @@ last_state_for() {
   awk -v a="$agent" -F'\t' '$1==a {print $3; exit}' "$STATE_FILE"
 }
 
-write_state() {
+# Accumulate new state in memory and write the full file once at end with a
+# PID-namespaced tmp. This eliminates the per-iteration rewrite race that two
+# concurrent invocations would otherwise hit on a shared $STATE_FILE.tmp.
+declare -a NEW_STATE_ROWS=()
+
+stage_state() {
   local agent="$1" tokens="$2" cap_state="$3"
   local now
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  local tmp="${STATE_FILE}.tmp"
-  awk -v a="$agent" -F'\t' '$1!=a' "$STATE_FILE" > "$tmp" || true
-  printf '%s\t%s\t%s\t%s\n' "$agent" "$tokens" "$cap_state" "$now" >> "$tmp"
+  NEW_STATE_ROWS+=("$(printf '%s\t%s\t%s\t%s' "$agent" "$tokens" "$cap_state" "$now")")
+}
+
+commit_state() {
+  local tmp="${STATE_FILE}.$$.tmp"
+  : > "$tmp"
+  local row
+  for row in "${NEW_STATE_ROWS[@]}"; do
+    printf '%s\n' "$row" >> "$tmp"
+  done
   mv "$tmp" "$STATE_FILE"
 }
 
@@ -109,8 +127,12 @@ exit_code=0
 for agent_dir in "$FRAMEWORK_ROOT"/orgs/*/agents/*/; do
   [ -d "$agent_dir" ] || continue
   agent=$(basename "$agent_dir")
-  # Skip dotfiles / placeholder dirs.
-  case "$agent" in .*) continue ;; esac
+  # Skip dotfiles / placeholder dirs and reject any name with whitespace —
+  # a newline in $agent would corrupt the TSV state file.
+  case "$agent" in
+    .*) continue ;;
+    *[$'\n\t ']*) log "skip agent with whitespace in name: $(printf %q "$agent")"; continue ;;
+  esac
 
   total_bytes=0
   for f in "${PAYLOAD_FILES[@]}"; do
@@ -129,12 +151,13 @@ for agent_dir in "$FRAMEWORK_ROOT"/orgs/*/agents/*/; do
     if [ "$prev_state" != "over" ]; then
       send_alert "$agent" "$tokens"
     fi
-    write_state "$agent" "$tokens" "over"
+    stage_state "$agent" "$tokens" "over"
     exit_code=1
   else
     log "agent=$agent tokens=$tokens cap=$CAP_TOKENS state=under prev=$prev_state"
-    write_state "$agent" "$tokens" "under"
+    stage_state "$agent" "$tokens" "under"
   fi
 done
 
+commit_state
 exit $exit_code

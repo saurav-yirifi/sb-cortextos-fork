@@ -98,7 +98,7 @@ All thresholds live at the top of each script as shell variables — open the sc
 ### `payload-cap-drift.sh`
 - `PAYLOAD_CAP_TOKENS` (default `15000`) — per-agent combined CLAUDE.md + MEMORY.md + HEARTBEAT.md cap. Approximates tokens as `bytes / 4`; well within the noise floor of the cap.
 - No launchd plist template ships for this script — wire it into your preferred cron schedule (daily or weekly is plenty). The simplest path is to add a 1-line `crons[]` entry to your standby-enforcer agent's `config.json` that invokes `bash $CTX_FRAMEWORK_ROOT/scripts/self-healing/payload-cap-drift.sh`.
-- Idempotency state: `~/.cortextos/<instance>/payload-cap-state.tsv`. Delete to re-alert on next breach.
+- Idempotency state: `~/.cortextos/<instance>/payload-cap-state.tsv`. Delete to re-arm — next breach run will alert again.
 
 ## Caveats
 
