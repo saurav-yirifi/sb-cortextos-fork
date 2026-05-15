@@ -26,7 +26,17 @@ describe('parsePercent', () => {
   });
 
   it('parses without the % sign at all (bare number)', () => {
+    // Intentional: dashboards sometimes render the number in one element
+    // and the "%" unit in a sibling, so a bare number is a valid read.
     expect(parsePercent('0')).toBe(0);
+  });
+
+  it('rejects digits buried in non-numeric prefix (anchored)', () => {
+    // The regex anchors at start-of-string to block stray matches like
+    // a version label or token-count phrase from passing as a percentage.
+    expect(parsePercent('Plan v2')).toBeNull();
+    expect(parsePercent('100 tokens remaining')).toBe(100); // leading digit OK
+    expect(parsePercent('Plan 47%')).toBeNull(); // leading non-digit blocks
   });
 
   it('parses zero', () => {

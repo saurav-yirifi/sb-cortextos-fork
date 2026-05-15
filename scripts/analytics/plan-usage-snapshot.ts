@@ -170,6 +170,11 @@ class SelectorMissError extends Error {
   }
 }
 class ParseError extends Error {}
+// Distinct typed errors instead of string-prefix sentinels on a generic
+// SelectorMissError — the main() dispatcher routes by `instanceof` so a
+// reword of the error message can't silently shift the reason code.
+class LoggedOutError extends Error {}
+class PageNavTimeoutError extends Error {}
 
 // --- core flow --------------------------------------------------------------
 
@@ -198,14 +203,17 @@ async function scrape(page: Page): Promise<PlanUsageSample> {
   await page.bringToFront();
   try {
     await page.reload({ waitUntil: 'networkidle2', timeout: 30_000 });
-  } catch {
-    // ignore — read whatever's there; selector miss is the louder signal anyway
+  } catch (err) {
+    // Surface reload failure as the proximate cause rather than letting
+    // downstream selector misses get mis-attributed to selector_drift.
+    // Reload errors are typically nav timeouts on a stale/offline tab.
+    throw new PageNavTimeoutError(`reload failed: ${(err as Error).message}`);
   }
 
   // Login sentinel — fail fast with a precise reason.
   const loggedOut = await page.$(SELECTOR_LOGIN_SENTINEL);
   if (loggedOut) {
-    throw new SelectorMissError(`logged-out (matched ${SELECTOR_LOGIN_SENTINEL})`);
+    throw new LoggedOutError(`tab is logged out (matched ${SELECTOR_LOGIN_SENTINEL})`);
   }
 
   const weekly_pct = await readPercentText(page, SELECTOR_WEEKLY_PCT);
@@ -310,7 +318,9 @@ async function main(): Promise<number> {
     try {
       page = await findOrOpenUsageTab(browser);
     } catch (err) {
-      const dump = await dumpDebugArtifacts(null, args.debugDir, 'claude_tab_not_found');
+      // Dump filename and emitted reason must match — one source of truth
+      // for "where do I look in debug/?" vs "what does the event say?"
+      const dump = await dumpDebugArtifacts(null, args.debugDir, 'page_nav_timeout');
       emitEvent('plan_usage_scrape_failed', 'warn', {
         agent: process.env.CTX_AGENT_NAME ?? 'analyst',
         reason: 'page_nav_timeout' as FailureReason,
@@ -326,13 +336,15 @@ async function main(): Promise<number> {
       sample = await scrape(page);
     } catch (err) {
       const reason: FailureReason =
-        err instanceof SelectorMissError
-          ? err.message.startsWith('logged-out')
-            ? 'claude_logged_out'
-            : 'selector_drift'
-          : err instanceof ParseError
-            ? 'parse_error'
-            : 'unexpected';
+        err instanceof LoggedOutError
+          ? 'claude_logged_out'
+          : err instanceof PageNavTimeoutError
+            ? 'page_nav_timeout'
+            : err instanceof SelectorMissError
+              ? 'selector_drift'
+              : err instanceof ParseError
+                ? 'parse_error'
+                : 'unexpected';
       const dump = await dumpDebugArtifacts(page, args.debugDir, reason);
       emitEvent('plan_usage_scrape_failed', 'warn', {
         agent: process.env.CTX_AGENT_NAME ?? 'analyst',
@@ -377,6 +389,10 @@ async function main(): Promise<number> {
 main()
   .then((code) => process.exit(code))
   .catch((err) => {
+    // Reachable only if the finally block (browser.disconnect) throws past
+    // the inner catch-all — every business-logic failure is already handled
+    // inside main(). Exit 2 distinguishes "framework died" from "scrape
+    // failed cleanly" (exit 1) for cron consumers.
     process.stderr.write(`[plan-usage-snapshot] fatal: ${(err as Error).stack ?? err}\n`);
     process.exit(2);
   });
