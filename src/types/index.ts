@@ -247,9 +247,23 @@ export interface AgentConfig {
    * `heartbeat_stale_realert_minutes`: re-alert cadence while still stale.
    * Default 30. May-14 was a 9h event; a single alert at minute 11
    * followed by silence is not enough.
+   *
+   * `task_stuck_threshold_minutes`: Path B watchdog — alert when an agent
+   * holds the same `current_task` for longer than this without
+   * `current_task` advancing, independent of last_heartbeat refreshes
+   * (side-channel surfaces like send-telegram bump last_heartbeat but not
+   * task_started_at). Default 30. Set to 0 to disable the task-stuck leg
+   * for this agent class while keeping the existing staleness alert.
+   * Spec: orgs/sb-personal/agents/analyst/specs/theta-wave-candidates/
+   * watchdog-threshold-tuning.md.
+   *
+   * `task_stuck_realert_minutes`: re-alert cadence while task remains
+   * stuck. Default 30, matching the staleness re-alert cadence.
    */
   heartbeat_stale_threshold_minutes?: number;
   heartbeat_stale_realert_minutes?: number;
+  task_stuck_threshold_minutes?: number;
+  task_stuck_realert_minutes?: number;
   /**
    * Claude account profile name. Resolves to a CLAUDE_CONFIG_DIR via
    * `orgs/<org>/profiles.json`. When unset, the spawn path falls back
