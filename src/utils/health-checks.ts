@@ -34,6 +34,28 @@ export interface RunAllChecksOptions {
   frameworkRoot: string;
 }
 
+// Spawning the Claude CLI can transiently fail under load (fork/exec
+// contention while other claude sessions are starting up). A single missed
+// probe should not page Saurav via the doctor-cron `fail` transition — retry
+// briefly first. 3 attempts cap wall-time at ~2s.
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function probeClaudeVersion(): Promise<string | null> {
+  const backoffsMs = [0, 500, 1500];
+  for (const delay of backoffsMs) {
+    if (delay > 0) await sleep(delay);
+    try {
+      // stdio: 'pipe' suppresses stderr inheritance — important when
+      // doctor-cron runs us, so transient failure messages don't pollute the
+      // daemon log. The original line 66 inline call omitted this.
+      return execSync('claude --version', { encoding: 'utf-8', stdio: 'pipe', timeout: 5000 }).trim();
+    } catch { /* retry */ }
+  }
+  return null;
+}
+
 export async function runAllChecks(options: RunAllChecksOptions): Promise<Check[]> {
   const checks: Check[] = [];
   const { instanceId, frameworkRoot } = options;
@@ -62,14 +84,14 @@ export async function runAllChecks(options: RunAllChecksOptions): Promise<Check[
   }
 
   // ── Claude Code CLI ───────────────────────────────────────────────────────
-  try {
-    const claudeVersion = execSync('claude --version', { encoding: 'utf-8', timeout: 5000 }).trim();
+  const claudeVersion = await probeClaudeVersion();
+  if (claudeVersion) {
     checks.push({ name: 'Claude Code CLI', status: 'pass', message: claudeVersion });
-  } catch {
+  } else {
     checks.push({
       name: 'Claude Code CLI',
       status: 'fail',
-      message: 'Not found',
+      message: 'Not found (3 attempts over ~2s)',
       fix: 'Install Claude Code: npm install -g @anthropic-ai/claude-code',
     });
   }
@@ -143,10 +165,11 @@ export async function runAllChecks(options: RunAllChecksOptions): Promise<Check[
   });
 
   // ── Claude Code auth ──────────────────────────────────────────────────────
-  try {
-    execSync('claude --version', { encoding: 'utf8', stdio: 'pipe' });
+  // Reuse the same retried probe — `warn` here doesn't page, but a transient
+  // miss would still register as a pass→warn transition in the cron snapshot.
+  if (claudeVersion) {
     checks.push({ name: 'Claude Code auth', status: 'pass', message: 'Authenticated' });
-  } catch {
+  } else {
     checks.push({
       name: 'Claude Code auth',
       status: 'warn',
@@ -249,9 +272,11 @@ export async function runAllChecks(options: RunAllChecksOptions): Promise<Check[
   }
 
   // ── Framework code-quality rules ─────────────────────────────────────────
-  const codeQualityRulesPath = join(frameworkRoot, '.claude', 'rules', 'code-quality.md');
+  // Canonical location is .claude/docs/code-quality.md since PR #25 (de30689,
+  // chore(docs): relocate code-quality rules from .claude/rules/ to .claude/docs/).
+  const codeQualityRulesPath = join(frameworkRoot, '.claude', 'docs', 'code-quality.md');
   checks.push({
-    name: '.claude/rules/code-quality.md',
+    name: '.claude/docs/code-quality.md',
     status: existsSync(codeQualityRulesPath) ? 'pass' : 'warn',
     message: existsSync(codeQualityRulesPath) ? 'Found' : 'Not found — agents will fail to load engineering bar at session start',
     fix: !existsSync(codeQualityRulesPath) ? 'Run: cortextos bus check-upstream --apply to fetch the latest framework rules' : undefined,

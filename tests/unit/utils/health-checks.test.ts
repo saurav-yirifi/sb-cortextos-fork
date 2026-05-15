@@ -74,6 +74,36 @@ describe('runAllChecks (fleet-resilience #4 extraction)', () => {
     expect(profCheck!.message.toLowerCase()).toContain('malformed');
   });
 
+  it('finds .claude/docs/code-quality.md at the post-PR-#25 path (not the stale .claude/rules/)', async () => {
+    const docsDir = join(frameworkRoot, '.claude', 'docs');
+    mkdirSync(docsDir, { recursive: true });
+    writeFileSync(join(docsDir, 'code-quality.md'), '# code-quality');
+    // Also populate the stale location to confirm the check ignores it.
+    const stale = join(frameworkRoot, '.claude', 'rules');
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, 'code-quality.md'), '# stale');
+
+    const checks = await runAllChecks({ instanceId: 'default', frameworkRoot });
+    const cq = checks.find((c) => c.name === '.claude/docs/code-quality.md');
+    expect(cq).toBeDefined();
+    expect(cq!.status).toBe('pass');
+    // Stale name must NOT appear — would carry forward as undefined in the
+    // doctor-cron snapshot and confuse operators reading the alert.
+    expect(checks.find((c) => c.name === '.claude/rules/code-quality.md')).toBeUndefined();
+  });
+
+  it('warns on .claude/docs/code-quality.md absence (even if stale .claude/rules/ path is populated)', async () => {
+    const stale = join(frameworkRoot, '.claude', 'rules');
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(join(stale, 'code-quality.md'), '# stale');
+
+    const checks = await runAllChecks({ instanceId: 'default', frameworkRoot });
+    const cq = checks.find((c) => c.name === '.claude/docs/code-quality.md');
+    expect(cq).toBeDefined();
+    expect(cq!.status).toBe('warn');
+    expect(cq!.message).toContain('Not found');
+  });
+
   it('flags analyst doc drift when templates/<file>.md is newer than active', async () => {
     const tpl = join(frameworkRoot, 'templates', 'analyst');
     const active = join(frameworkRoot, 'orgs', 'acme', 'agents', 'analyst');
