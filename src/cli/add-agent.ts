@@ -503,7 +503,7 @@ The full CLI reference lives at \`docs_sb/guides/bus-cli-reference.md\`. Most-us
 ## Token & Context Efficiency
 
 - **Batch Bash calls.** Run \`git status && git log -5 && git diff --stat\` in one Bash call; three sequential turns each pay full cache_read.
-- **\`/compact\` cadence.** At phase boundary with context yellow+, ask operator for \`/compact\`. Canned prompts in \`.claude/rules/code-quality/compact-instructions.md\`.
+- **\`/compact\` cadence.** At phase boundary with context yellow+, ask operator for \`/compact\`.
 - **Prefer CLI over MCP.** Use \`gh\`, \`aws\`, \`gcloud\`, \`bun\` directly — fewer per-tool listing tokens than MCP equivalents.
 - **Cache hygiene.** Don't modify tool definitions or system messages mid-session — invalidates the cache prefix.
 

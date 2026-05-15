@@ -17,7 +17,7 @@ If `ONBOARDED`: continue with the session start protocol below.
 
 ## On Session Start
 
-See AGENTS.md for the full 14-step session start checklist. Key steps:
+See AGENTS.md for the full 13-step session start checklist. Key steps:
 
 1. **Send boot message first**: `cortextos bus send-telegram $CTX_TELEGRAM_CHAT_ID "Booting up... one moment"`
 2. Read all bootstrap files: IDENTITY.md, SOUL.md, GUARDRAILS.md, GOALS.md, HEARTBEAT.md, MEMORY.md, USER.md, TOOLS.md, SYSTEM.md
