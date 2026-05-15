@@ -124,6 +124,14 @@ export interface Heartbeat {
   mode: 'day' | 'night';
   last_heartbeat: string; // ISO 8601
   loop_interval: string;
+  // Path B watchdog (watchdog-threshold-tuning spec): timestamp the agent
+  // STARTED working on `current_task`. Set to now on every current_task
+  // transition; null when current_task is empty. Preserved across side-
+  // channel heartbeat refreshes (send-telegram, send-message) so the
+  // task-stuck watcher can measure "how long has this task been held"
+  // independent of last_heartbeat. May be undefined on heartbeats written
+  // by older versions (treat as null at read time).
+  task_started_at?: string | null;
   // Legacy field — sync.ts falls back to this if last_heartbeat absent
   timestamp?: string;
 }
