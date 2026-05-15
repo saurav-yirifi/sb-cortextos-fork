@@ -10,6 +10,11 @@ import { logDaemonEvent } from './daemon-event-logger.js';
 // `last_heartbeat: ISO8601` and `current_task`. Every event-log write also
 // refreshes last_heartbeat (see src/bus/event.ts:refreshHeartbeatTimestamp),
 // so as long as the agent is doing *anything* observable the file ticks.
+// Trap: user-facing bus commands like `send-telegram` and `send-message`
+// also tick the heartbeat — they emit `telegram_sent` / `message_sent`
+// events internally (see src/cli/bus.ts), so any timing test that depends
+// on a "silent" agent must avoid those commands too, not only the obvious
+// `update-heartbeat` and `log-event` surfaces.
 // When it goes silent past `thresholdMs` the watcher escalates.
 //
 // Idle-suppression: a "stale" agent with `current_task === ''` is on standby
