@@ -32,7 +32,7 @@ Prerequisites:
 Verify after install:
 
 ```bash
-launchctl list | grep cortextos    # expect 4 lines (one per service)
+launchctl list | grep cortextos    # expect 5 lines (one per service)
 ```
 
 ### Manual install (rarely needed)
@@ -42,7 +42,7 @@ If `cortextos install` couldn't complete the launchd step for some reason (Gatek
 ```bash
 # 1. Copy scripts into your local cortextOS state dir
 mkdir -p ~/.cortextos/default/scripts ~/.cortextos/default/logs
-cp scripts/self-healing/{watchdog,agent-recover,usage-monitor,compact-boundary-watcher}.sh ~/.cortextos/default/scripts/
+cp scripts/self-healing/{watchdog,agent-recover,usage-monitor,compact-boundary-watcher,payload-cap-drift}.sh ~/.cortextos/default/scripts/
 chmod +x ~/.cortextos/default/scripts/*.sh
 
 # 2. Render plist templates ({HOME}, {INSTANCE} are the only tokens used)
@@ -54,7 +54,7 @@ done
 
 # 3. Bootstrap the launchd jobs (modern macOS) — falls back to `launchctl load -w` if bootstrap fails
 UID_=$(id -u)
-for f in ~/Library/LaunchAgents/com.cortextos.{watchdog,agent-recover,usage-monitor,compact-boundary-watcher}.plist; do
+for f in ~/Library/LaunchAgents/com.cortextos.{watchdog,agent-recover,usage-monitor,compact-boundary-watcher,payload-cap-drift}.plist; do
   launchctl bootstrap gui/$UID_ "$f"
 done
 ```
@@ -69,7 +69,7 @@ Each script writes to `~/.cortextos/<instance>/logs/<scriptname>.log`. Tail thos
 
 ```bash
 UID_=$(id -u)
-for s in watchdog agent-recover usage-monitor compact-boundary-watcher; do
+for s in watchdog agent-recover usage-monitor compact-boundary-watcher payload-cap-drift; do
   launchctl bootout gui/$UID_/com.cortextos.$s
   rm "$HOME/Library/LaunchAgents/com.cortextos.$s.plist"
 done
@@ -97,7 +97,7 @@ All thresholds live at the top of each script as shell variables — open the sc
 
 ### `payload-cap-drift.sh`
 - `PAYLOAD_CAP_TOKENS` (default `15000`) — per-agent combined CLAUDE.md + MEMORY.md + HEARTBEAT.md cap. Approximates tokens as `bytes / 4`; well within the noise floor of the cap.
-- No launchd plist template ships for this script — wire it into your preferred cron schedule (daily or weekly is plenty). The simplest path is to add a 1-line `crons[]` entry to your standby-enforcer agent's `config.json` that invokes `bash $CTX_FRAMEWORK_ROOT/scripts/self-healing/payload-cap-drift.sh`.
+- Schedule: daily at 09:00 local (`StartCalendarInterval` with `Hour: 9, Minute: 0` in the plist). `RunAtLoad: false` — install does not trigger an immediate fire. To switch to weekly, add a `Weekday` key (0–6, Sunday=0) inside the `StartCalendarInterval` dict alongside `Hour` and `Minute` — all three keys must remain or launchd defaults to midnight.
 - Idempotency state: `~/.cortextos/<instance>/payload-cap-state.tsv`. Delete to re-arm — next breach run will alert again.
 
 ## Caveats
