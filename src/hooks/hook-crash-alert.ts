@@ -24,6 +24,7 @@ import { execFile } from 'child_process';
 
 import { readLogTail } from '../utils/log-tail.js';
 import { maybeEmitQuotaEvent } from './quota-detection.js';
+import { readStdin } from './index.js';
 // Re-export quota-detection helpers from this module so existing
 // importers (tests, future callers) can keep using
 // `hook-crash-alert` as the surface — the extraction is structural
@@ -41,10 +42,39 @@ const QUIET_HOUR_START_LA = 22;                 // 22:00 America/Los_Angeles
 const QUIET_HOUR_END_LA = 7;                    // 07:00 America/Los_Angeles
 
 // End types that ping Telegram. All other types (planned-restart,
-// session-refresh, user-restart, user-disable, user-stop, daemon-stop) are
-// planned/expected exits and are log-only per .claude/rules/comms-discipline.md
-// Rule 5 — operational invisible noise, not user signal.
+// session-refresh, user-restart, user-disable, user-stop, daemon-stop,
+// user-exit) are planned/expected exits and are log-only per
+// .claude/rules/comms-discipline.md Rule 5 — operational invisible
+// noise, not user signal.
 export const TELEGRAM_PING_TYPES = new Set(['crash', 'daemon-crashed', 'rate-limited']);
+
+// SessionEnd reasons Claude Code reports when the user closes the TUI
+// (typing `/exit`, `/clear`, or `Ctrl-D`). None of these involve a
+// cortextos command, so no state marker is written; without this
+// classifier the hook falls through to `crash` and pages Saurav.
+const USER_EXIT_REASONS = new Set(['logout', 'prompt_input_submit', 'clear']);
+
+/**
+ * Inspect the SessionEnd stdin payload Claude Code provides on the way
+ * out. Returns 'user-exit' when `reason` matches one of the documented
+ * user-initiated TUI exits, null otherwise. Null means "no opinion" —
+ * the caller keeps whatever classification it already has.
+ *
+ * Tolerant of empty input, non-JSON input, and missing/unexpected
+ * `reason` values. Never throws.
+ */
+export function classifyStdinReason(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let payload: { reason?: unknown };
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const reason = typeof payload?.reason === 'string' ? payload.reason : null;
+  if (reason && USER_EXIT_REASONS.has(reason)) return 'user-exit';
+  return null;
+}
 
 // Of the ping types, only 'rate-limited' suppresses during quiet hours.
 // 'crash' and 'daemon-crashed' page through the night — genuine abnormality
@@ -202,6 +232,29 @@ async function main(): Promise<void> {
         unlinkSync(markerPath);
       } catch { /* ignore */ }
       break;
+    }
+  }
+
+  // If no marker matched, ask the SessionEnd stdin payload whether the user
+  // closed the TUI themselves (`/exit`, `/clear`, Ctrl-D). Those paths never
+  // run a cortextos command, so no marker exists — without this check the
+  // hook defaults to `crash` and pages Saurav. Race against a short timer:
+  // Claude Code does close stdin for SessionEnd, but a hung pipe would
+  // block the daemon's respawn loop. clearTimeout on the winning path so
+  // the timer doesn't keep the event loop alive after main() resolves.
+  // No earlier code in this hook reads stdin, so readStdin() starts from
+  // a fresh stream.
+  if (endType === 'crash') {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const raw = await Promise.race([
+      readStdin().catch(() => ''),
+      new Promise<string>(resolve => { timer = setTimeout(() => resolve(''), 2_000); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    const stdinType = classifyStdinReason(raw);
+    if (stdinType) {
+      endType = stdinType;
+      reason = 'SessionEnd_reason=user-initiated';
     }
   }
 
