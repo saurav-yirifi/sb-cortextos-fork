@@ -163,14 +163,18 @@ describe('composePlistPath', () => {
       .toBe('/Users/x/.nvm/versions/node/v22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin');
   });
 
-  it('avoids duplicating when node bin already in fallback (homebrew node case)', () => {
+  it('keeps homebrew node at position 0, dedups the fallback entry', () => {
     expect(composePlistPath('/opt/homebrew/bin'))
       .toBe('/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin');
   });
 
-  it('treats /usr/local/bin (system node) the same way', () => {
+  it('keeps /usr/local/bin (system node) at position 0 — does NOT silently promote homebrew', () => {
+    // Regression: an earlier dedup implementation reused the fallback chain
+    // verbatim when nodeBinPath matched any fallback entry, which moved
+    // /opt/homebrew/bin ahead of /usr/local/bin and made self-healers prefer
+    // homebrew binaries even when the running node was system-installed.
     expect(composePlistPath('/usr/local/bin'))
-      .toBe('/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin');
+      .toBe('/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin');
   });
 
   it('on macOS: bootstraps each service via launchctl bootstrap', () => {

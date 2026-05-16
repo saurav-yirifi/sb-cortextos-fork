@@ -9,8 +9,10 @@ import {
   writeFileSync,
 } from 'fs';
 import { homedir } from 'os';
-import { dirname, join, resolve } from 'path';
+import { dirname, join } from 'path';
 import { execSync, spawnSync } from 'child_process';
+
+import { atomicWriteSync } from '../utils/atomic.js';
 
 /**
  * Fleet-resilience #6 — install + uninstall the launchd-managed self-healing
@@ -157,28 +159,45 @@ export function detectNodeBinPath(): string {
 }
 
 /**
- * Repo root that hosts `dist/cli.js` + `scripts/`. `install-self-healing.ts`
- * is bundled into `dist/cli.js`, so `__dirname` at runtime is `<root>/dist`
- * and the framework root is one level up. Stable across npm-link symlinks
- * since Node resolves __dirname against the realpath. Self-healing shell
- * scripts read this via `$CTX_FRAMEWORK_ROOT` (e.g.
+ * Repo root that hosts `dist/cli.js` + `scripts/`. Walks up from `__dirname`
+ * looking for a directory that contains both `package.json` and
+ * `scripts/self-healing/` — the cortextos repo root. Works both when
+ * `install-self-healing.ts` runs from `src/cli/` (vitest / ts-node) and
+ * when it is bundled into `dist/cli.js` (production install). Self-healing
+ * shell scripts read this via `$CTX_FRAMEWORK_ROOT` (e.g.
  * `$FRAMEWORK_ROOT/scripts/session-analysis/analyze.py`).
+ *
+ * Falls back to `process.cwd()` if no ancestor matches (covers the case
+ * where `cortextos install` is invoked from the repo root via npm scripts).
  */
 export function detectFrameworkRoot(): string {
-  return resolve(__dirname, '..');
+  let dir = __dirname;
+  for (let i = 0; i < 8; i++) {
+    if (
+      existsSync(join(dir, 'package.json')) &&
+      existsSync(join(dir, 'scripts', 'self-healing'))
+    ) {
+      return dir;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
 }
 
 /**
  * Compose the PATH string written into each plist's `EnvironmentVariables`.
- * Prepends `nodeBinPath` to the homebrew + system fallback chain. Skips the
- * prepend when nodeBinPath already appears in the fallback (e.g. node was
- * installed via homebrew so it already lives at /opt/homebrew/bin) — avoids
- * a duplicate entry that wouldn't be wrong but is ugly in launchctl dumps.
+ * Always prepends `nodeBinPath` to the homebrew + system fallback chain and
+ * removes the corresponding fallback entry to avoid a duplicate. Preserving
+ * `nodeBinPath` at position 0 matters when the user runs a non-homebrew
+ * node (e.g. /usr/local/bin) — we don't want self-healers to silently
+ * resolve binaries from /opt/homebrew/bin ahead of the actual node's
+ * neighbors.
  */
 export function composePlistPath(nodeBinPath: string): string {
   const fallback = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
-  if (fallback.includes(nodeBinPath)) return fallback.join(':');
-  return [nodeBinPath, ...fallback].join(':');
+  return [nodeBinPath, ...fallback.filter(p => p !== nodeBinPath)].join(':');
 }
 
 /**
@@ -249,7 +268,11 @@ export function installSelfHealing(
       const rendered = renderPlist(templatePath, {
         home, instance, path: plistEnvPath, frameworkRoot,
       });
-      writeFileSync(plistPath, rendered, 'utf-8');
+      // Atomic write so a mid-install crash never leaves a half-rendered
+      // plist for launchd to load on next boot — that would re-create
+      // exactly the symptom this PR fixes (literal {CTX_FRAMEWORK_ROOT}
+      // string instead of a real path, immediate exit 78).
+      atomicWriteSync(plistPath, rendered);
       try { chmodSync(plistPath, 0o644); } catch { /* best effort */ }
 
       // Idempotency: if the service is already loaded, leave it alone — a
