@@ -1,0 +1,32 @@
+{
+  "agent_name": "devops-c",
+  "enabled": true,
+  "runtime": "codex-app-server",
+  "model": "gpt-5-codex",
+  "startup_delay": 0,
+  "max_session_seconds": 255600,
+  "max_crashes_per_day": 10,
+  "working_directory": "",
+  "timezone": "UTC",
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task. Log standby_cycle_complete event when idle with meta {state_delta, summary, idle_since}; do NOT send-message to boss unless state_delta=true. Follow community/skills/comms-discipline/RULE.md."
+    }
+  ],
+  "day_mode_start": "08:00",
+  "day_mode_end": "00:00",
+  "communication_style": "direct and casual",
+  "approval_rules": {
+    "always_ask": [
+      "external-comms",
+      "financial",
+      "deployment",
+      "data-deletion"
+    ],
+    "never_ask": []
+  },
+  "heartbeat_stale_threshold_minutes": 60
+}

@@ -12,7 +12,24 @@ dist/
 ecosystem.config.js
 
 # User-created org data (not part of the framework)
-orgs/
+# Default: ignore everything under orgs/, but explicitly track non-secret agent config so
+# changes to model / thresholds / MCP allowlist / identity prose are diff-able. .env stays
+# ignored via the global .env rule below.
+orgs/**
+!orgs/
+!orgs/*/
+!orgs/*/agents/
+!orgs/*/agents/*/
+!orgs/*/agents/*/config.json
+!orgs/*/agents/*/CLAUDE.md
+!orgs/*/agents/*/IDENTITY.md
+!orgs/*/agents/*/SOUL.md
+!orgs/*/agents/*/GOALS.md
+!orgs/*/agents/*/GUARDRAILS.md
+!orgs/*/agents/*/HEARTBEAT.md
+!orgs/*/agents/*/.mcp.json
+!orgs/*/agents/*/.claude/
+!orgs/*/agents/*/.claude/settings.json
 # But community subdirectories ARE part of the framework
 !community/
 !community/**
