@@ -10,7 +10,6 @@
     ],
     "defaultMode": "bypassPermissions"
   },
-  "enableAllProjectMcpServers": true,
   "statusLine": {
     "type": "command",
     "command": "cortextos bus hook-context-status",
@@ -84,5 +83,15 @@
         ]
       }
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "discord-in",
+    "github-gw",
+    "grafana",
+    "insights",
+    "loki",
+    "sentinel-data",
+    "victoriametrics",
+    "yq-pmo"
+  ]
 }

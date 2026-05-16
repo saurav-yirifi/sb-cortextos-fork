@@ -10,7 +10,6 @@
     ],
     "defaultMode": "bypassPermissions"
   },
-  "enableAllProjectMcpServers": true,
   "statusLine": {
     "type": "command",
     "command": "cortextos bus hook-context-status",
@@ -95,5 +94,8 @@
         ]
       }
     ]
-  }
+  },
+  "enabledMcpjsonServers": [
+    "github-gw"
+  ]
 }
