@@ -3,7 +3,7 @@
   "enabled": true,
   "model": "opus",
   "startup_delay": 0,
-  "max_session_seconds": 28800,
+  "max_session_seconds": 27000,
   "max_crashes_per_day": 10,
   "working_directory": "",
   "timezone": "UTC",
