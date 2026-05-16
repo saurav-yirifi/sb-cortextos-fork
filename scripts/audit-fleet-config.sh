@@ -51,7 +51,6 @@ for agent_dir in "$AGENTS_DIR"/*/; do
   config="$agent_dir/config.json"
   settings="$agent_dir/.claude/settings.json"
   env_file="$agent_dir/.env"
-  mcp_file="$agent_dir/.mcp.json"
 
   [[ -f "$config" ]] || { printf "%-15s [no config.json]\n" "$name"; continue; }
 
@@ -95,9 +94,13 @@ for agent_dir in "$AGENTS_DIR"/*/; do
     fi
   fi
 
-  # 1M flag check: should be DISABLED on non-opus (moot but tidy); ENABLED on opus
+  # 1M flag check: should be ENABLED on opus; flag should be SET on sonnet
+  # (Sonnet 1M requires extra-usage billing — without the disable flag, compaction
+  # fails at 100% ctx. Keep the flag on for sonnet/haiku as a safety net.)
   if [[ "$model" == "opus" && "$disable_1m" == "yes" ]]; then
     flags+="1M-OFF "
+  elif [[ "$model" == "sonnet" && "$disable_1m" == "no" ]]; then
+    flags+="1M-ON "
   fi
 
   total_rows=$((total_rows + 1))

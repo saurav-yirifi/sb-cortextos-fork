@@ -18,7 +18,7 @@ cortextos bus log-event action <cycle>_complete info --meta '{
 }'
 ```
 
-Canonical action names: `heartbeat_cycle_complete`, `audit_run_complete`, `ingest_cycle_complete`, `standby_cycle_complete`, `theta_wave_cycle_complete`. Full glossary in skill `comms-send-discipline` (Rule 7) — invoke before logging a new cycle type.
+Canonical action names: `heartbeat_cycle_complete`, `audit_run_complete`, `ingest_cycle_complete`, `standby_cycle_complete`, `theta_wave_cycle_complete`. These five cover every routine cycle — use them as-is. Only invoke the `comms-send-discipline` skill (Rule 7) if you need to log a genuinely new cycle type not in the list.
 
 Boss / analyst / Saurav query via:
 
