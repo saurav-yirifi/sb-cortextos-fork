@@ -129,12 +129,39 @@ export function assessSelfHealer(opts: AssessSelfHealerOptions): Check {
     };
   }
 
+  // Log freshness is the PRIMARY health signal. The 2026-05-17 verification
+  // run showed that launchd reports `LastExitStatus = 78` (= 19968) on EVERY
+  // run of a StartInterval script that exits in <10s (the default
+  // ThrottleInterval). Watchdog, agent-recover, and compact-boundary-watcher
+  // were all writing fresh log entries while launchctl simultaneously
+  // showed exit 78 — they were healthy; launchd was just penalising the
+  // quick exit. So exit-code interpretation is secondary: we only escalate
+  // a non-zero exit to fail when the log is ALSO stale/missing.
+  const logPath = join(ctxRoot, spec.logRelativePath);
+  const s = stat(logPath);
+  const ageSec = s ? (nowMs - s.mtimeMs) / 1000 : Infinity;
+  const thresholdSec = spec.expectedIntervalSec * (spec.staleThresholdMultiplier ?? 3);
+  const logFresh = ageSec <= thresholdSec;
+
+  if (logFresh) {
+    // Healthy: the script ran recently. Surface the exit-78 quick-exit
+    // signal in the message so operators understand the launchctl quirk
+    // when they cross-reference, but don't fail on it.
+    const note = lastExitCode === 78 ? ' (exit 78 = launchd ThrottleInterval quick-exit, not EX_CONFIG)' : '';
+    return {
+      name: `Self-healer: ${spec.name}`,
+      status: 'pass',
+      message: `Last cycle ${Math.floor(ageSec)}s ago (cap ${thresholdSec}s)${note}`,
+    };
+  }
+
+  // Log is stale OR missing. NOW the exit code is diagnostic.
   if (lastExitCode === 78) {
     return {
       name: `Self-healer: ${spec.name}`,
       status: 'fail',
-      message: `Crash-looping with exit 78 (EX_CONFIG) — plist PATH / CTX_FRAMEWORK_ROOT broken`,
-      fix: `Re-run cortextos install (PR-X2 fixed the plist templates so the nvm-installed pm2/ccusage/cortextos are on PATH and CTX_FRAMEWORK_ROOT points at the repo)`,
+      message: `Log stale (${s ? Math.floor(ageSec / 60) + 'm' : 'never written'}) AND exit 78 (EX_CONFIG) — plist PATH / CTX_FRAMEWORK_ROOT broken or a required binary missing on PATH`,
+      fix: `Run each self-healer script manually under launchd's env: env -i HOME=$HOME PATH=$(plutil -extract EnvironmentVariables.PATH raw ~/Library/LaunchAgents/${spec.label}.plist) bash ~/.cortextos/<instance>/scripts/${spec.name}.sh — find the missing binary, install it (e.g. ccusage: npm install -g ccusage), then re-run cortextos install.`,
     };
   }
 
@@ -142,13 +169,11 @@ export function assessSelfHealer(opts: AssessSelfHealerOptions): Check {
     return {
       name: `Self-healer: ${spec.name}`,
       status: 'fail',
-      message: `Last run exited ${lastExitCode}`,
+      message: `Log stale (${s ? Math.floor(ageSec / 60) + 'm' : 'never written'}) and last exit ${lastExitCode}`,
       fix: `Inspect ~/.cortextos/<instance>/${spec.logRelativePath} and the matching .stderr.log for the failure reason`,
     };
   }
 
-  const logPath = join(ctxRoot, spec.logRelativePath);
-  const s = stat(logPath);
   if (!s) {
     return {
       name: `Self-healer: ${spec.name}`,
@@ -156,21 +181,12 @@ export function assessSelfHealer(opts: AssessSelfHealerOptions): Check {
       message: `Registered but ${spec.logRelativePath} does not exist — script has not produced a successful cycle yet`,
     };
   }
-  const ageSec = (nowMs - s.mtimeMs) / 1000;
-  const thresholdSec = spec.expectedIntervalSec * (spec.staleThresholdMultiplier ?? 3);
-  if (ageSec > thresholdSec) {
-    return {
-      name: `Self-healer: ${spec.name}`,
-      status: 'warn',
-      message: `${spec.logRelativePath} stale by ${Math.floor(ageSec / 60)}m (expected cycle every ${spec.expectedIntervalSec}s)`,
-      fix: `Tail the log; if the script is genuinely broken, restart with: launchctl kickstart -k gui/$(id -u)/${spec.label}`,
-    };
-  }
 
   return {
     name: `Self-healer: ${spec.name}`,
-    status: 'pass',
-    message: `Last cycle ${Math.floor(ageSec)}s ago (cap ${thresholdSec}s)`,
+    status: 'warn',
+    message: `${spec.logRelativePath} stale by ${Math.floor(ageSec / 60)}m (expected cycle every ${spec.expectedIntervalSec}s)`,
+    fix: `Tail the log; if the script is genuinely broken, restart with: launchctl kickstart -k gui/$(id -u)/${spec.label}`,
   };
 }
 
