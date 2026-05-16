@@ -32,6 +32,9 @@ import {
   installSelfHealing,
   uninstallSelfHealing,
   SELF_HEALING_SERVICES,
+  detectNodeBinPath,
+  detectFrameworkRoot,
+  composePlistPath,
 } from '../../../src/cli/install-self-healing.js';
 
 const ORIGINAL_PLATFORM = process.platform;
@@ -64,6 +67,8 @@ beforeEach(() => {
       `<plist><dict>
   <key>HomeRef</key><string>{HOME}/path</string>
   <key>InstanceRef</key><string>{INSTANCE}</string>
+  <key>PathRef</key><string>{PATH}</string>
+  <key>FrameworkRef</key><string>{CTX_FRAMEWORK_ROOT}</string>
 </dict></plist>`,
     );
   }
@@ -101,6 +106,71 @@ describe('installSelfHealing', () => {
     expect(plist).toContain('<string>staging</string>');
     expect(plist).not.toContain('{HOME}');
     expect(plist).not.toContain('{INSTANCE}');
+  });
+
+  it('on macOS: renders plist templates with {PATH} and {CTX_FRAMEWORK_ROOT} substituted', () => {
+    // Closes 2026-05-16 post-mortem Finding 3: launchd's default PATH
+    // excludes nvm bins, so the hardcoded homebrew-only PATH made every
+    // self-healer exit 78. Detected node bin path is prepended; framework
+    // root is templated from the install-time location, not `~/cortextos`.
+    setPlatform('darwin');
+    installSelfHealing(ctxRoot, 'default', {
+      sourceDir,
+      launchAgentsDir,
+      homeDirOverride,
+      nodeBinPathOverride: '/Users/test/.nvm/versions/node/v22.0.0/bin',
+      frameworkRootOverride: '/Volumes/repo/sb-cortextos-fork',
+    });
+
+    const plist = readFileSync(join(launchAgentsDir, 'com.cortextos.watchdog.plist'), 'utf-8');
+    expect(plist).toContain('<string>/Users/test/.nvm/versions/node/v22.0.0/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>');
+    expect(plist).toContain('<string>/Volumes/repo/sb-cortextos-fork</string>');
+    expect(plist).not.toContain('{PATH}');
+    expect(plist).not.toContain('{CTX_FRAMEWORK_ROOT}');
+  });
+
+  it('on macOS: detected node bin path falls back to live process.execPath when not overridden', () => {
+    setPlatform('darwin');
+    installSelfHealing(ctxRoot, 'default', { sourceDir, launchAgentsDir, homeDirOverride });
+
+    const plist = readFileSync(join(launchAgentsDir, 'com.cortextos.watchdog.plist'), 'utf-8');
+    // Live detection should produce SOMETHING that starts with the node bin
+    // dir and includes the homebrew + system fallback.
+    expect(plist).toMatch(/<string>[^<]+:\/opt\/homebrew\/bin:\/usr\/local\/bin:\/usr\/bin:\/bin:\/usr\/sbin:\/sbin<\/string>/);
+    // Framework root should be an absolute path, not the unresolved placeholder.
+    expect(plist).not.toContain('{CTX_FRAMEWORK_ROOT}');
+  });
+});
+
+describe('detectNodeBinPath', () => {
+  it('returns dirname of process.execPath (where pm2/ccusage/cortextos co-locate)', () => {
+    const result = detectNodeBinPath();
+    expect(result).toBe(require('path').dirname(process.execPath));
+  });
+});
+
+describe('detectFrameworkRoot', () => {
+  it('returns an absolute path one level up from this module', () => {
+    const result = detectFrameworkRoot();
+    expect(result.startsWith('/')).toBe(true);
+    expect(result).not.toContain('{');
+  });
+});
+
+describe('composePlistPath', () => {
+  it('prepends node bin path to the homebrew + system fallback chain', () => {
+    expect(composePlistPath('/Users/x/.nvm/versions/node/v22/bin'))
+      .toBe('/Users/x/.nvm/versions/node/v22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin');
+  });
+
+  it('avoids duplicating when node bin already in fallback (homebrew node case)', () => {
+    expect(composePlistPath('/opt/homebrew/bin'))
+      .toBe('/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin');
+  });
+
+  it('treats /usr/local/bin (system node) the same way', () => {
+    expect(composePlistPath('/usr/local/bin'))
+      .toBe('/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin');
   });
 
   it('on macOS: bootstraps each service via launchctl bootstrap', () => {

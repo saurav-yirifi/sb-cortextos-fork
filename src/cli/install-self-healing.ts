@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { execSync, spawnSync } from 'child_process';
 
 /**
@@ -43,6 +43,16 @@ export interface InstallSelfHealingOptions {
    *  flag is only useful when you want to run the file-staging path on
    *  macOS without touching launchd. */
   skipLaunchctl?: boolean;
+  /** Override the directory containing pm2/ccusage/cortextos (the directory
+   *  prepended to the launchd plist `PATH`). Defaults to `dirname(process.execPath)`
+   *  — the same directory the running `node` binary lives in, which is where
+   *  `npm install -g` puts everything under nvm or system node. */
+  nodeBinPathOverride?: string;
+  /** Override the framework-root path written into each plist's
+   *  `CTX_FRAMEWORK_ROOT` env var. Defaults to `resolve(__dirname, '..')`
+   *  — the directory containing `dist/`, which is where the self-healing
+   *  shell scripts expect to find `scripts/`, `dist/cli.js`, etc. */
+  frameworkRootOverride?: string;
 }
 
 export interface InstallSelfHealingResult {
@@ -122,9 +132,53 @@ function unloadService(plistPath: string, label: string, uid: string, skipLaunch
   return { ok: legacy.status === 0 };
 }
 
-function renderPlist(templatePath: string, home: string, instance: string): string {
+function renderPlist(
+  templatePath: string,
+  vars: { home: string; instance: string; path: string; frameworkRoot: string },
+): string {
   const tpl = readFileSync(templatePath, 'utf-8');
-  return tpl.replace(/\{HOME\}/g, home).replace(/\{INSTANCE\}/g, instance);
+  return tpl
+    .replace(/\{HOME\}/g, vars.home)
+    .replace(/\{INSTANCE\}/g, vars.instance)
+    .replace(/\{PATH\}/g, vars.path)
+    .replace(/\{CTX_FRAMEWORK_ROOT\}/g, vars.frameworkRoot);
+}
+
+/**
+ * Directory containing the binaries the self-healing scripts shell out to
+ * (`pm2`, `ccusage`, `cortextos`). Under nvm + `npm install -g`, these all
+ * live next to the running node binary. Under homebrew or system node the
+ * same invariant holds. Prepending this directory to the launchd plist
+ * PATH is the durable fix for the 2026-05-16 post-mortem Finding 3:
+ * launchd's default PATH excludes nvm and every self-healer exits 78.
+ */
+export function detectNodeBinPath(): string {
+  return dirname(process.execPath);
+}
+
+/**
+ * Repo root that hosts `dist/cli.js` + `scripts/`. `install-self-healing.ts`
+ * is bundled into `dist/cli.js`, so `__dirname` at runtime is `<root>/dist`
+ * and the framework root is one level up. Stable across npm-link symlinks
+ * since Node resolves __dirname against the realpath. Self-healing shell
+ * scripts read this via `$CTX_FRAMEWORK_ROOT` (e.g.
+ * `$FRAMEWORK_ROOT/scripts/session-analysis/analyze.py`).
+ */
+export function detectFrameworkRoot(): string {
+  return resolve(__dirname, '..');
+}
+
+/**
+ * Compose the PATH string written into each plist's `EnvironmentVariables`.
+ * Prepends `nodeBinPath` to the homebrew + system fallback chain. Skips the
+ * prepend when nodeBinPath already appears in the fallback (e.g. node was
+ * installed via homebrew so it already lives at /opt/homebrew/bin) — avoids
+ * a duplicate entry that wouldn't be wrong but is ugly in launchctl dumps.
+ */
+export function composePlistPath(nodeBinPath: string): string {
+  const fallback = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+  if (fallback.includes(nodeBinPath)) return fallback.join(':');
+  return [nodeBinPath, ...fallback].join(':');
 }
 
 /**
@@ -154,6 +208,9 @@ export function installSelfHealing(
   const home = opts.homeDirOverride ?? homedir();
   const launchAgentsDir = opts.launchAgentsDir ?? defaultLaunchAgentsDir(home);
   const skipLaunchctl = opts.skipLaunchctl ?? false;
+  const nodeBinPath = opts.nodeBinPathOverride ?? detectNodeBinPath();
+  const frameworkRoot = opts.frameworkRootOverride ?? detectFrameworkRoot();
+  const plistEnvPath = composePlistPath(nodeBinPath);
   // Cache uid once per install — `id -u` is invariant for a given process and
   // we hit launchctl once per service across the loop.
   const uid = getUid();
@@ -189,7 +246,9 @@ export function installSelfHealing(
     }
 
     try {
-      const rendered = renderPlist(templatePath, home, instance);
+      const rendered = renderPlist(templatePath, {
+        home, instance, path: plistEnvPath, frameworkRoot,
+      });
       writeFileSync(plistPath, rendered, 'utf-8');
       try { chmodSync(plistPath, 0o644); } catch { /* best effort */ }
 
