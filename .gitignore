@@ -1,10 +1,17 @@
 node_modules/
-.claude/
+# Ignore contents of .claude/ by default, then selectively re-include the dirs
+# that are part of the framework. The trailing `**` (not bare `.claude/`) is
+# load-bearing — `.claude/` would prevent git from descending and the negations
+# below would be dead. With `.claude/**`, the dir itself stays trackable and
+# per-subdir / per-file negations work.
+.claude/**
 !.claude/commands/
 !.claude/commands/**
 !.claude/orchestration-cortextos-node/
 !.claude/rules/
 !.claude/rules/**
+!.claude/skills/
+!.claude/skills/**
 # Include template .claude dirs (needed for agent settings.json)
 !templates/**/.claude/
 !templates/**/.claude/**
