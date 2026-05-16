@@ -8,7 +8,12 @@ vi.mock('child_process', () => ({
   execFile: (...args: unknown[]) => execFileMock(...args),
 }));
 
-import { readMaxCrashesPerDay, notifyAgents, TELEGRAM_PING_TYPES } from '../../../src/hooks/hook-crash-alert';
+import {
+  readMaxCrashesPerDay,
+  notifyAgents,
+  TELEGRAM_PING_TYPES,
+  classifyStdinReason,
+} from '../../../src/hooks/hook-crash-alert';
 
 describe('readMaxCrashesPerDay', () => {
   let tmp: string;
@@ -65,9 +70,53 @@ describe('TELEGRAM_PING_TYPES', () => {
   });
 
   it('does not include planned/expected exit types', () => {
-    for (const planned of ['planned-restart', 'session-refresh', 'user-restart', 'user-disable', 'user-stop', 'daemon-stop']) {
+    for (const planned of ['planned-restart', 'session-refresh', 'user-restart', 'user-disable', 'user-stop', 'daemon-stop', 'user-exit']) {
       expect(TELEGRAM_PING_TYPES.has(planned)).toBe(false);
     }
+  });
+});
+
+describe('classifyStdinReason', () => {
+  // Closes the 2026-05-16 post-mortem Finding 2 gap: when Saurav types
+  // `/exit` (or `/clear`, or Ctrl-D) in the TUI, no cortextos command
+  // runs, so no marker is written. Without this classifier the hook
+  // defaults to `crash` and pages Saurav for a routine exit.
+  it.each([
+    ['logout', 'user-exit'],
+    ['prompt_input_submit', 'user-exit'],
+    ['clear', 'user-exit'],
+  ])('classifies reason=%s as %s', (reason, expected) => {
+    expect(classifyStdinReason(JSON.stringify({ reason }))).toBe(expected);
+  });
+
+  it('returns null for reason=other so caller falls through to crash', () => {
+    expect(classifyStdinReason(JSON.stringify({ reason: 'other' }))).toBeNull();
+  });
+
+  it('returns null for unknown reason', () => {
+    expect(classifyStdinReason(JSON.stringify({ reason: 'something-new' }))).toBeNull();
+  });
+
+  it('returns null when reason field is missing', () => {
+    expect(classifyStdinReason(JSON.stringify({ session_id: 'x' }))).toBeNull();
+  });
+
+  it('returns null when reason is not a string', () => {
+    expect(classifyStdinReason(JSON.stringify({ reason: 42 }))).toBeNull();
+  });
+
+  it('returns null for empty string', () => {
+    expect(classifyStdinReason('')).toBeNull();
+  });
+
+  it('returns null for null/undefined', () => {
+    expect(classifyStdinReason(null)).toBeNull();
+    expect(classifyStdinReason(undefined)).toBeNull();
+  });
+
+  it('returns null for malformed JSON without throwing', () => {
+    expect(() => classifyStdinReason('{ not valid')).not.toThrow();
+    expect(classifyStdinReason('{ not valid')).toBeNull();
   });
 });
 
