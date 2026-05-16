@@ -16,7 +16,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { runAllChecks } from '../../../src/utils/health-checks';
+import {
+  runAllChecks,
+  interpretLaunchctlList,
+  assessSelfHealer,
+  SELF_HEALER_SPECS,
+  type SelfHealerSpec,
+} from '../../../src/utils/health-checks';
 
 let frameworkRoot: string;
 
@@ -104,6 +110,12 @@ describe('runAllChecks (fleet-resilience #4 extraction)', () => {
     expect(cq!.message).toContain('Not found');
   });
 
+  // ── 2026-05-16 post-mortem Finding 3 follow-up — meta-watchdog tests ──
+  // These exercise the assessSelfHealer helper directly via injection so the
+  // test does not need real launchctl / filesystem state. The runAllChecks
+  // integration that pushes these checks is exercised by the smoke test
+  // above (every Check satisfies the schema).
+
   it('flags analyst doc drift when templates/<file>.md is newer than active', async () => {
     const tpl = join(frameworkRoot, 'templates', 'analyst');
     const active = join(frameworkRoot, 'orgs', 'acme', 'agents', 'analyst');
@@ -126,5 +138,149 @@ describe('runAllChecks (fleet-resilience #4 extraction)', () => {
     expect(drift!.status).toBe('warn');
     expect(drift!.message).toContain('HEARTBEAT.md');
     expect(drift!.message).toContain('GUARDRAILS.md');
+  });
+});
+
+describe('interpretLaunchctlList', () => {
+  it('returns registered=false when launchctl list itself failed', () => {
+    expect(interpretLaunchctlList('', 1)).toEqual({ registered: false, lastExitCode: null });
+  });
+
+  it('returns registered=true + lastExitCode=null when LastExitStatus is absent (never ran)', () => {
+    const stdout = `{
+\t"Label" = "com.cortextos.watchdog";
+\t"OnDemand" = true;
+};`;
+    expect(interpretLaunchctlList(stdout, 0)).toEqual({ registered: true, lastExitCode: null });
+  });
+
+  it('decodes EX_CONFIG (78) from the wait-status word 19968', () => {
+    // 19968 = 78 << 8. This is the exact signature observed on Saurav's
+    // machine in the 2026-05-16 post-mortem.
+    const stdout = `{\n\t"LastExitStatus" = 19968;\n};`;
+    expect(interpretLaunchctlList(stdout, 0)).toEqual({ registered: true, lastExitCode: 78 });
+  });
+
+  it('decodes a clean exit (0) when wait-status word is 0', () => {
+    expect(interpretLaunchctlList(`{ "LastExitStatus" = 0; };`, 0))
+      .toEqual({ registered: true, lastExitCode: 0 });
+  });
+
+  it('decodes exit code 1 from raw wait-status 256', () => {
+    expect(interpretLaunchctlList(`{ "LastExitStatus" = 256; };`, 0))
+      .toEqual({ registered: true, lastExitCode: 1 });
+  });
+});
+
+describe('assessSelfHealer', () => {
+  const watchdog: SelfHealerSpec = SELF_HEALER_SPECS[0];
+  const fakeCtxRoot = '/tmp/fake-ctxroot';
+
+  it('returns warn when service is not registered with launchd', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: '', status: 1 }),
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('Not registered');
+    expect(result.fix).toContain('cortextos install');
+  });
+
+  it('returns fail with explicit EX_CONFIG message on exit 78 (the post-mortem signature)', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 19968; };`, status: 0 }),
+    });
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('78');
+    expect(result.message).toContain('EX_CONFIG');
+    expect(result.fix).toContain('PR-X2');
+  });
+
+  it('returns fail on any other non-zero last exit code', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 256; };`, status: 0 }),
+    });
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('1');
+  });
+
+  it('returns warn when registered + clean exit but log file does not exist', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => null,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('does not exist');
+  });
+
+  it('returns warn when log is older than expectedIntervalSec × 3', () => {
+    const nowMs = 1_700_000_000_000;
+    // watchdog expectedIntervalSec=300 → threshold 900s. 1000s old = stale.
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 1000 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('stale');
+  });
+
+  it('returns pass when registered + clean exit + fresh log', () => {
+    const nowMs = 1_700_000_000_000;
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 60 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('Last cycle');
+  });
+
+  it('returns null lastExitCode (treated as pass when log fresh) when service registered but never ran', () => {
+    const nowMs = 1_700_000_000_000;
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "Label" = "x"; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 30 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    // No LastExitStatus → not fail; fresh log → pass.
+    expect(result.status).toBe('pass');
+  });
+});
+
+describe('SELF_HEALER_SPECS', () => {
+  it('contains exactly the 5 services from scripts/self-healing/', () => {
+    expect(SELF_HEALER_SPECS.map((s) => s.name).sort()).toEqual([
+      'agent-recover',
+      'compact-boundary-watcher',
+      'payload-cap-drift',
+      'usage-monitor',
+      'watchdog',
+    ]);
+  });
+
+  it('every spec has a launchd label matching the com.cortextos.<name> convention', () => {
+    for (const spec of SELF_HEALER_SPECS) {
+      expect(spec.label).toBe(`com.cortextos.${spec.name}`);
+    }
+  });
+
+  it('every spec has a positive expectedIntervalSec', () => {
+    for (const spec of SELF_HEALER_SPECS) {
+      expect(spec.expectedIntervalSec).toBeGreaterThan(0);
+    }
   });
 });
