@@ -360,6 +360,14 @@ export class AgentProcess {
    */
   async sessionRefresh(): Promise<void> {
     this.log('Session refresh (--continue restart)');
+    // hook-crash-alert.ts reads .session-refresh to classify this exit as a
+    // planned session refresh; without it, the SessionEnd hook defaults to
+    // `crash` and pollutes crashes.log. Mirrors src/bus/system.ts:65.
+    const stateDir = join(this.env.ctxRoot, 'state', this.name);
+    ensureDir(stateDir);
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const reason = `internal-timer max_session_seconds [${ts}]`;
+    writeFileSync(join(stateDir, '.session-refresh'), reason + '\n', 'utf-8');
     await this.stop();
     await this.start();
     this.log('Session refreshed');
