@@ -65,7 +65,7 @@
       "enabled": false
     }
   },
-  "ctx_warning_threshold": 70,
-  "ctx_handoff_threshold": 80,
+  "ctx_warning_threshold": 40,
+  "ctx_handoff_threshold": 50,
   "heartbeat_stale_threshold_minutes": 10
 }
