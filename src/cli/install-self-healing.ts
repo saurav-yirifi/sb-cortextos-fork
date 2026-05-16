@@ -9,8 +9,10 @@ import {
   writeFileSync,
 } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { execSync, spawnSync } from 'child_process';
+
+import { atomicWriteSync } from '../utils/atomic.js';
 
 /**
  * Fleet-resilience #6 — install + uninstall the launchd-managed self-healing
@@ -43,6 +45,16 @@ export interface InstallSelfHealingOptions {
    *  flag is only useful when you want to run the file-staging path on
    *  macOS without touching launchd. */
   skipLaunchctl?: boolean;
+  /** Override the directory containing pm2/ccusage/cortextos (the directory
+   *  prepended to the launchd plist `PATH`). Defaults to `dirname(process.execPath)`
+   *  — the same directory the running `node` binary lives in, which is where
+   *  `npm install -g` puts everything under nvm or system node. */
+  nodeBinPathOverride?: string;
+  /** Override the framework-root path written into each plist's
+   *  `CTX_FRAMEWORK_ROOT` env var. Defaults to `resolve(__dirname, '..')`
+   *  — the directory containing `dist/`, which is where the self-healing
+   *  shell scripts expect to find `scripts/`, `dist/cli.js`, etc. */
+  frameworkRootOverride?: string;
 }
 
 export interface InstallSelfHealingResult {
@@ -122,9 +134,70 @@ function unloadService(plistPath: string, label: string, uid: string, skipLaunch
   return { ok: legacy.status === 0 };
 }
 
-function renderPlist(templatePath: string, home: string, instance: string): string {
+function renderPlist(
+  templatePath: string,
+  vars: { home: string; instance: string; path: string; frameworkRoot: string },
+): string {
   const tpl = readFileSync(templatePath, 'utf-8');
-  return tpl.replace(/\{HOME\}/g, home).replace(/\{INSTANCE\}/g, instance);
+  return tpl
+    .replace(/\{HOME\}/g, vars.home)
+    .replace(/\{INSTANCE\}/g, vars.instance)
+    .replace(/\{PATH\}/g, vars.path)
+    .replace(/\{CTX_FRAMEWORK_ROOT\}/g, vars.frameworkRoot);
+}
+
+/**
+ * Directory containing the binaries the self-healing scripts shell out to
+ * (`pm2`, `ccusage`, `cortextos`). Under nvm + `npm install -g`, these all
+ * live next to the running node binary. Under homebrew or system node the
+ * same invariant holds. Prepending this directory to the launchd plist
+ * PATH is the durable fix for the 2026-05-16 post-mortem Finding 3:
+ * launchd's default PATH excludes nvm and every self-healer exits 78.
+ */
+export function detectNodeBinPath(): string {
+  return dirname(process.execPath);
+}
+
+/**
+ * Repo root that hosts `dist/cli.js` + `scripts/`. Walks up from `__dirname`
+ * looking for a directory that contains both `package.json` and
+ * `scripts/self-healing/` — the cortextos repo root. Works both when
+ * `install-self-healing.ts` runs from `src/cli/` (vitest / ts-node) and
+ * when it is bundled into `dist/cli.js` (production install). Self-healing
+ * shell scripts read this via `$CTX_FRAMEWORK_ROOT` (e.g.
+ * `$FRAMEWORK_ROOT/scripts/session-analysis/analyze.py`).
+ *
+ * Falls back to `process.cwd()` if no ancestor matches (covers the case
+ * where `cortextos install` is invoked from the repo root via npm scripts).
+ */
+export function detectFrameworkRoot(): string {
+  let dir = __dirname;
+  for (let i = 0; i < 8; i++) {
+    if (
+      existsSync(join(dir, 'package.json')) &&
+      existsSync(join(dir, 'scripts', 'self-healing'))
+    ) {
+      return dir;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
+}
+
+/**
+ * Compose the PATH string written into each plist's `EnvironmentVariables`.
+ * Always prepends `nodeBinPath` to the homebrew + system fallback chain and
+ * removes the corresponding fallback entry to avoid a duplicate. Preserving
+ * `nodeBinPath` at position 0 matters when the user runs a non-homebrew
+ * node (e.g. /usr/local/bin) — we don't want self-healers to silently
+ * resolve binaries from /opt/homebrew/bin ahead of the actual node's
+ * neighbors.
+ */
+export function composePlistPath(nodeBinPath: string): string {
+  const fallback = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
+  return [nodeBinPath, ...fallback.filter(p => p !== nodeBinPath)].join(':');
 }
 
 /**
@@ -154,6 +227,9 @@ export function installSelfHealing(
   const home = opts.homeDirOverride ?? homedir();
   const launchAgentsDir = opts.launchAgentsDir ?? defaultLaunchAgentsDir(home);
   const skipLaunchctl = opts.skipLaunchctl ?? false;
+  const nodeBinPath = opts.nodeBinPathOverride ?? detectNodeBinPath();
+  const frameworkRoot = opts.frameworkRootOverride ?? detectFrameworkRoot();
+  const plistEnvPath = composePlistPath(nodeBinPath);
   // Cache uid once per install — `id -u` is invariant for a given process and
   // we hit launchctl once per service across the loop.
   const uid = getUid();
@@ -189,8 +265,14 @@ export function installSelfHealing(
     }
 
     try {
-      const rendered = renderPlist(templatePath, home, instance);
-      writeFileSync(plistPath, rendered, 'utf-8');
+      const rendered = renderPlist(templatePath, {
+        home, instance, path: plistEnvPath, frameworkRoot,
+      });
+      // Atomic write so a mid-install crash never leaves a half-rendered
+      // plist for launchd to load on next boot — that would re-create
+      // exactly the symptom this PR fixes (literal {CTX_FRAMEWORK_ROOT}
+      // string instead of a real path, immediate exit 78).
+      atomicWriteSync(plistPath, rendered);
       try { chmodSync(plistPath, 0o644); } catch { /* best effort */ }
 
       // Idempotency: if the service is already loaded, leave it alone — a

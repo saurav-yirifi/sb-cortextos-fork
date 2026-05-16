@@ -20,9 +20,11 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>{PATH}</string>
         <key>CTX_INSTANCE_ID</key>
         <string>{INSTANCE}</string>
+        <key>CTX_FRAMEWORK_ROOT</key>
+        <string>{CTX_FRAMEWORK_ROOT}</string>
     </dict>
 </dict>
 </plist>
