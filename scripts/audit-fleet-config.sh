@@ -68,6 +68,7 @@ for agent_dir in "$AGENTS_DIR"/*/; do
 
   # MCP allowlist source
   mcp_mode="(unset)"
+  mcp_drift=""
   if [[ -f "$settings" ]]; then
     enable_all=$(jq -r '.enableAllProjectMcpServers // false' "$settings")
     allowlist_count=$(jq -r '(.enabledMcpjsonServers // []) | length' "$settings")
@@ -75,6 +76,17 @@ for agent_dir in "$AGENTS_DIR"/*/; do
       mcp_mode="ALL"
     elif (( allowlist_count > 0 )); then
       mcp_mode="$allowlist_count"
+      # Cross-check: enabledMcpjsonServers should match .mcp.json keys exactly.
+      # If someone adds a server to .mcp.json without updating settings, it
+      # silently fails to load — flag that drift.
+      mcp_json="$agent_dir/.mcp.json"
+      if [[ -f "$mcp_json" ]]; then
+        allowlist_set=$(jq -c '(.enabledMcpjsonServers // []) | sort' "$settings")
+        mcp_keys=$(jq -c '(.mcpServers // {}) | keys | sort' "$mcp_json")
+        if [[ "$allowlist_set" != "$mcp_keys" ]]; then
+          mcp_drift="set"
+        fi
+      fi
     fi
   fi
 
@@ -85,6 +97,7 @@ for agent_dir in "$AGENTS_DIR"/*/; do
   [[ "$warn"  != "$exp_warn"  ]] && flags+="WARN "
   [[ "$handoff" != "$exp_handoff" ]] && flags+="HOFF "
   [[ "$mcp_mode" == "ALL" ]] && flags+="MCP-ALL "
+  [[ -n "$mcp_drift" ]]     && flags+="MCP-DRIFT "
   [[ "$enabled" == "false" ]] && flags+="DISABLED "
 
   # max_session_seconds: skip for devops-c (intentionally 255600)
