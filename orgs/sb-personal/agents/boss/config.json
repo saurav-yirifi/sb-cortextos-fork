@@ -1,0 +1,64 @@
+{
+  "agent_name": "boss",
+  "enabled": true,
+  "model": "opus",
+  "claude_profile": "personal",
+  "fallback_profile": "work",
+  "startup_delay": 0,
+  "max_session_seconds": 26100,
+  "max_crashes_per_day": 10,
+  "working_directory": "",
+  "timezone": "UTC",
+  "day_mode_start": "08:00",
+  "day_mode_end": "00:00",
+  "communication_style": "direct and casual",
+  "approval_rules": {
+    "always_ask": [
+      "external-comms",
+      "financial",
+      "deployment",
+      "data-deletion"
+    ],
+    "never_ask": []
+  },
+  "crons": [
+    {
+      "name": "heartbeat",
+      "type": "recurring",
+      "interval": "4h",
+      "prompt": "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, review agent health via cortextos bus read-all-heartbeats and cortextos bus read-cycle-summary --since 4h, and work on coordination tasks. Follow community/skills/comms-discipline/RULE.md (pull-model; silent receipt for routine status, reply only on state delta / action / question)."
+    },
+    {
+      "name": "check-approvals",
+      "type": "recurring",
+      "interval": "2h",
+      "prompt": "Check for pending approvals and human tasks. (1) cortextos bus list-approvals --format json — for any pending approval older than 1h, send user a Telegram reminder. (2) cortextos bus list-tasks --project human-tasks --status pending — for any [HUMAN] task pending >4h, send user a Telegram reminder with the task title and what's blocked. ACK any approval/human-task inbox messages."
+    },
+    {
+      "name": "morning-review",
+      "type": "recurring",
+      "cron": "0 8 * * *",
+      "prompt": "Read .claude/skills/morning-review/SKILL.md and execute the full morning review workflow. Include goal cascade from .claude/skills/goal-management/SKILL.md."
+    },
+    {
+      "name": "evening-review",
+      "type": "recurring",
+      "cron": "0 18 * * *",
+      "prompt": "Read .claude/skills/evening-review/SKILL.md and execute the full evening review workflow. Summarize the day, propose overnight tasks, queue nighttime work."
+    },
+    {
+      "name": "weekly-review",
+      "type": "recurring",
+      "cron": "0 8 * * 0",
+      "prompt": "Read .claude/skills/weekly-review/SKILL.md and run the full weekly review. Review all agent outputs, evaluate performance, plan next week."
+    }
+  ],
+  "ecosystem": {
+    "local_version_control": {
+      "enabled": true
+    }
+  },
+  "ctx_warning_threshold": 40,
+  "ctx_handoff_threshold": 50,
+  "heartbeat_stale_threshold_minutes": 10
+}

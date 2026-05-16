@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "github-gw": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/github/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "mcpServers": {
+    "sentinel-data": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/sentinel-data/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    },
+    "discord-in": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/discord-in/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    },
+    "yq-pmo": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/yq-pmo/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    },
+    "insights": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/insights/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    },
+    "github-gw": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/github/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    },
+    "loki": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/loki/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    },
+    "victoriametrics": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/vm/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    },
+    "grafana": {
+      "type": "http",
+      "url": "http://100.113.216.75:8443/grafana/",
+      "headers": { "Authorization": "Bearer ${CORTEXTOS_MCP_KEY}" }
+    }
+  }
+}
