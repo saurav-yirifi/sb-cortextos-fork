@@ -260,6 +260,40 @@ describe('AgentProcess - BUG-011 fix (stop awaits PTY exit)', () => {
     const startOrder = startSpy.mock.invocationCallOrder[0];
     expect(stopOrder).toBeLessThan(startOrder);
   });
+
+  it('sessionRefresh() writes .session-refresh marker BEFORE stopping', async () => {
+    // The marker must be written before stop() so the SessionEnd hook
+    // (hook-crash-alert.ts) sees it when the PTY exits. If it were written
+    // after stop(), the hook would already have classified the exit as a
+    // crash. The test pins the ordering explicitly.
+    const ap = new AgentProcess('alice', mockEnv, {});
+    await ap.start();
+
+    // Mock installed AFTER start() intentionally — start() may writeFileSync
+    // unrelated files (e.g. crash-budget); we only care about the marker
+    // write that happens inside sessionRefresh().
+    let markerWritten = false;
+    let markerContent = '';
+    fsMocks.writeFileSync.mockImplementation((p: any, content: any) => {
+      if (String(p).endsWith('/state/alice/.session-refresh')) {
+        markerWritten = true;
+        markerContent = String(content);
+      }
+    });
+
+    const stopSpy = vi.spyOn(ap, 'stop').mockImplementation(async () => {
+      // At the moment stop() runs, the marker must already exist.
+      expect(markerWritten).toBe(true);
+    });
+    vi.spyOn(ap, 'start').mockResolvedValue();
+
+    await ap.sessionRefresh();
+
+    expect(stopSpy).toHaveBeenCalled();
+    expect(markerWritten).toBe(true);
+    expect(markerContent).toContain('internal-timer max_session_seconds');
+    expect(markerContent.endsWith('\n')).toBe(true);
+  });
 });
 
 // Theta-wave 2026-05-15: crash-notification idle-gating. exit_code=0 with a
