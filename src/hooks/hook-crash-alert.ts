@@ -240,16 +240,21 @@ async function main(): Promise<void> {
   // run a cortextos command, so no marker exists — without this check the
   // hook defaults to `crash` and pages Saurav. Race against a short timer:
   // Claude Code does close stdin for SessionEnd, but a hung pipe would
-  // block the daemon's respawn loop.
+  // block the daemon's respawn loop. clearTimeout on the winning path so
+  // the timer doesn't keep the event loop alive after main() resolves.
+  // No earlier code in this hook reads stdin, so readStdin() starts from
+  // a fresh stream.
   if (endType === 'crash') {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const raw = await Promise.race([
       readStdin().catch(() => ''),
-      new Promise<string>(resolve => setTimeout(() => resolve(''), 2_000)),
+      new Promise<string>(resolve => { timer = setTimeout(() => resolve(''), 2_000); }),
     ]);
+    if (timer) clearTimeout(timer);
     const stdinType = classifyStdinReason(raw);
     if (stdinType) {
       endType = stdinType;
-      reason = 'SessionEnd reason=user-initiated';
+      reason = 'SessionEnd_reason=user-initiated';
     }
   }
 
