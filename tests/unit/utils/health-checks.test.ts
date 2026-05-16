@@ -199,51 +199,74 @@ describe('assessSelfHealer', () => {
     expect(result.fix).toContain('cortextos install');
   });
 
-  it('returns fail with explicit EX_CONFIG message on exit 78 (the post-mortem signature)', () => {
+  // The 2026-05-17 verification run flipped the exit-78 interpretation:
+  // launchd reports LastExitStatus = 78 on EVERY tick of a StartInterval
+  // script that runs in <10s (default ThrottleInterval), regardless of
+  // the script's actual exit code. So exit-78 is diagnostic ONLY when
+  // combined with a stale/missing log. Log freshness is the primary
+  // health signal; exit code is secondary.
+
+  it('returns pass when exit 78 BUT log is fresh (launchd quick-exit penalty for healthy script)', () => {
+    const nowMs = 1_700_000_000_000;
     const result = assessSelfHealer({
       spec: watchdog,
       ctxRoot: fakeCtxRoot,
       launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 19968; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 60 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('ThrottleInterval');
+  });
+
+  it('returns fail with EX_CONFIG message on exit 78 + stale log (real config break, the post-mortem signature)', () => {
+    const nowMs = 1_700_000_000_000;
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 19968; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 3600 * 1000 }), // 1h old, threshold 900s
+      nowMsOverride: nowMs,
     });
     expect(result.status).toBe('fail');
     expect(result.message).toContain('78');
     expect(result.message).toContain('EX_CONFIG');
-    expect(result.fix).toContain('PR-X2');
   });
 
-  it('returns fail on any other non-zero last exit code', () => {
+  it('returns fail on exit 78 + log NEVER written (script failed every tick since install — usage-monitor without ccusage)', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 19968; };`, status: 0 }),
+      statSyncOverride: () => null,
+    });
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('never written');
+  });
+
+  it('returns pass on any non-zero exit when log is fresh (script ran, exit code is launchd noise)', () => {
+    const nowMs = 1_700_000_000_000;
     const result = assessSelfHealer({
       spec: watchdog,
       ctxRoot: fakeCtxRoot,
       launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 256; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 60 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    expect(result.status).toBe('pass');
+  });
+
+  it('returns fail on non-78 non-zero exit + stale log', () => {
+    const nowMs = 1_700_000_000_000;
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 256; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 3600 * 1000 }),
+      nowMsOverride: nowMs,
     });
     expect(result.status).toBe('fail');
     expect(result.message).toContain('1');
-  });
-
-  it('returns warn when registered + clean exit but log file does not exist', () => {
-    const result = assessSelfHealer({
-      spec: watchdog,
-      ctxRoot: fakeCtxRoot,
-      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
-      statSyncOverride: () => null,
-    });
-    expect(result.status).toBe('warn');
-    expect(result.message).toContain('does not exist');
-  });
-
-  it('returns warn when log is older than expectedIntervalSec × 3', () => {
-    const nowMs = 1_700_000_000_000;
-    // watchdog expectedIntervalSec=300 → threshold 900s. 1000s old = stale.
-    const result = assessSelfHealer({
-      spec: watchdog,
-      ctxRoot: fakeCtxRoot,
-      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
-      statSyncOverride: () => ({ mtimeMs: nowMs - 1000 * 1000 }),
-      nowMsOverride: nowMs,
-    });
-    expect(result.status).toBe('warn');
-    expect(result.message).toContain('stale');
   });
 
   it('returns pass when registered + clean exit + fresh log', () => {
@@ -259,10 +282,20 @@ describe('assessSelfHealer', () => {
     expect(result.message).toContain('Last cycle');
   });
 
+  it('returns warn when registered + clean exit + log stale (no exit code to escalate)', () => {
+    const nowMs = 1_700_000_000_000;
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 1000 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('stale');
+  });
+
   it('returns warn (does-not-exist branch) when service registered but never ran AND no log file', () => {
-    // Realistic "never ran" state: no LastExitStatus + no log file. The
-    // assessor falls through the non-zero-exit checks and hits the log
-    // staleness branch, which sees null from statSyncOverride.
     const result = assessSelfHealer({
       spec: watchdog,
       ctxRoot: fakeCtxRoot,
@@ -273,7 +306,9 @@ describe('assessSelfHealer', () => {
     expect(result.message).toContain('does not exist');
   });
 
-  it('returns fail when last run was killed by signal (SIGKILL)', () => {
+  it('returns fail when last run was killed by signal (SIGKILL) — runs before log check', () => {
+    // Signal kills are always real (launchd doesn't synthesise them), so we
+    // surface them before considering log freshness.
     const result = assessSelfHealer({
       spec: watchdog,
       ctxRoot: fakeCtxRoot,
@@ -287,7 +322,6 @@ describe('assessSelfHealer', () => {
     const dailyDrift = SELF_HEALER_SPECS.find((s) => s.name === 'payload-cap-drift')!;
     expect(dailyDrift.staleThresholdMultiplier).toBe(1.5);
     const nowMs = 1_700_000_000_000;
-    // 86400 × 1.5 = 129600s = 36h threshold. 48h old should warn.
     const result = assessSelfHealer({
       spec: dailyDrift,
       ctxRoot: fakeCtxRoot,
