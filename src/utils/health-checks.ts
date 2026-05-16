@@ -1,9 +1,178 @@
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { loadProfileRegistry, findDanglingReferences } from './profiles.js';
 import { ensureSpawnHelperExecutable } from './node-pty-perms.js';
+
+// ---------------------------------------------------------------------------
+// Self-healing service liveness — added after 2026-05-16 post-mortem
+// Finding 3 (`docs_sb/post_mortem/2026-05-16-boss-analyst-crash-spam-and-
+// launchd-noop.md`). All 5 services had been exit-78 since install but
+// the only existing check covered com.cortextos.tunnel — watchdog ran
+// 249 no-op cycles before anyone noticed. The post-mortem A.3 Why 6/7
+// calls these "the meta-watchdog the system was missing".
+// ---------------------------------------------------------------------------
+
+export interface SelfHealerSpec {
+  name: string;                 // service short name, e.g. 'watchdog'
+  label: string;                // launchd label, e.g. 'com.cortextos.watchdog'
+  logRelativePath: string;      // path under ~/.cortextos/<instance>/
+  expectedIntervalSec: number;  // StartInterval or CalendarInterval cadence
+  /** Multiplier on expectedIntervalSec for the log-staleness threshold.
+   *  Defaults to 3 (allow two missed ticks). Daily-cadence services use
+   *  1.5 so a broken job is surfaced inside 36h, not 72h. */
+  staleThresholdMultiplier?: number;
+}
+
+// TODO(PR-X4): post-mortem A.3 Why 5 — add a `cortextos doctor` check that
+// diffs the live plist `PATH` against `which pm2 / ccusage / cortextos`
+// and warns on drift. Out of scope for PR-X3 (which detects *failure*; the
+// PATH-drift check would detect *future-failure*).
+export const SELF_HEALER_SPECS: SelfHealerSpec[] = [
+  { name: 'watchdog',                 label: 'com.cortextos.watchdog',                 logRelativePath: 'logs/watchdog.log',                 expectedIntervalSec: 300 },
+  { name: 'agent-recover',            label: 'com.cortextos.agent-recover',            logRelativePath: 'logs/agent-recover.log',            expectedIntervalSec: 300 },
+  { name: 'usage-monitor',            label: 'com.cortextos.usage-monitor',            logRelativePath: 'logs/usage-monitor.log',            expectedIntervalSec: 1800 },
+  { name: 'compact-boundary-watcher', label: 'com.cortextos.compact-boundary-watcher', logRelativePath: 'logs/compact-boundary-watcher.log', expectedIntervalSec: 600 },
+  { name: 'payload-cap-drift',        label: 'com.cortextos.payload-cap-drift',        logRelativePath: 'logs/payload-cap-drift.log',        expectedIntervalSec: 86_400, staleThresholdMultiplier: 1.5 },
+];
+
+export interface LaunchctlListInterpretation {
+  registered: boolean;
+  /** Exit code when the last run terminated normally. null when LastExitStatus
+   *  is absent (service never ran) or when terminated by signal. */
+  lastExitCode: number | null;
+  /** Signal number when the last run was killed by a signal (e.g. SIGKILL=9).
+   *  null when normally terminated or never ran. */
+  lastSignal: number | null;
+}
+
+/**
+ * Parse `launchctl list <label>` output. The format is NeXTSTEP-plist-like
+ * key/value pairs separated by semicolons. We only care about
+ * `LastExitStatus = N`. N is the raw Unix wait-status word:
+ *   - low 7 bits  = signal that terminated the child (0 if not signaled)
+ *   - next byte   = exit code (only meaningful when signal byte is 0)
+ * Negative values (observed on some macOS versions for mid-run unloads)
+ * round-trip through the same bit-twiddling correctly — `(-1 >> 8) & 0xff`
+ * is 255, which surfaces as a generic non-zero exit.
+ *
+ * `listExitCode` is the exit of `launchctl list` itself: non-zero means
+ * the label is not registered with launchd at all.
+ */
+export function interpretLaunchctlList(stdout: string, listExitCode: number): LaunchctlListInterpretation {
+  if (listExitCode !== 0) return { registered: false, lastExitCode: null, lastSignal: null };
+  const m = stdout.match(/"?LastExitStatus"?\s*=\s*(-?\d+)/);
+  if (!m) return { registered: true, lastExitCode: null, lastSignal: null };
+  const raw = parseInt(m[1], 10);
+  const signal = raw & 0x7f;
+  if (signal !== 0) {
+    // Signal-killed: exit code field is meaningless per POSIX. Surface the
+    // signal separately so SIGKILL doesn't masquerade as exit 0.
+    return { registered: true, lastExitCode: null, lastSignal: signal };
+  }
+  return { registered: true, lastExitCode: (raw >> 8) & 0xff, lastSignal: null };
+}
+
+export interface AssessSelfHealerOptions {
+  spec: SelfHealerSpec;
+  ctxRoot: string;
+  /** Override `launchctl list` for tests. Returns { stdout, status }. */
+  launchctlListOverride?: (label: string) => { stdout: string; status: number };
+  /** Override `Date.now()` for hermetic log-staleness tests. */
+  nowMsOverride?: number;
+  /** Override `statSync` for tests that don't want to touch the FS. */
+  statSyncOverride?: (path: string) => { mtimeMs: number } | null;
+}
+
+/**
+ * Combine launchctl state + log freshness into a single Check.
+ *  - launchctl list non-zero       → warn  (not installed; re-run `cortextos install`)
+ *  - LastExitStatus = 78 (EX_CONFIG) → fail  (matches 2026-05-16 Finding 3 — point at PR-X2)
+ *  - LastExitStatus != 0           → fail  (script error path)
+ *  - LastExitStatus 0 + stale log  → warn  (registered but not actually running)
+ *  - LastExitStatus 0 + fresh log  → pass
+ *
+ * Staleness threshold = expectedIntervalSec × 3 (allow two missed ticks
+ * before alerting, the third missed tick crosses the threshold).
+ */
+export function assessSelfHealer(opts: AssessSelfHealerOptions): Check {
+  const { spec, ctxRoot } = opts;
+  const launchctlList = opts.launchctlListOverride
+    ?? ((label) => {
+      const r = spawnSync('launchctl', ['list', label], { encoding: 'utf-8', stdio: 'pipe' });
+      return { stdout: r.stdout ?? '', status: r.status ?? 1 };
+    });
+  const nowMs = opts.nowMsOverride ?? Date.now();
+  const stat = opts.statSyncOverride ?? ((p) => {
+    try { return { mtimeMs: statSync(p).mtimeMs }; } catch { return null; }
+  });
+
+  const { stdout, status } = launchctlList(spec.label);
+  const { registered, lastExitCode, lastSignal } = interpretLaunchctlList(stdout, status);
+
+  if (!registered) {
+    return {
+      name: `Self-healer: ${spec.name}`,
+      status: 'warn',
+      message: `Not registered with launchd`,
+      fix: `Run: cortextos install (re-renders ~/Library/LaunchAgents/${spec.label}.plist and bootstraps it)`,
+    };
+  }
+
+  if (lastSignal !== null) {
+    return {
+      name: `Self-healer: ${spec.name}`,
+      status: 'fail',
+      message: `Last run killed by signal ${lastSignal}`,
+      fix: `Inspect ~/.cortextos/<instance>/${spec.logRelativePath} and the matching .stderr.log; signal-kills often mean the daemon was forcibly stopped or hit a resource limit`,
+    };
+  }
+
+  if (lastExitCode === 78) {
+    return {
+      name: `Self-healer: ${spec.name}`,
+      status: 'fail',
+      message: `Crash-looping with exit 78 (EX_CONFIG) — plist PATH / CTX_FRAMEWORK_ROOT broken`,
+      fix: `Re-run cortextos install (PR-X2 fixed the plist templates so the nvm-installed pm2/ccusage/cortextos are on PATH and CTX_FRAMEWORK_ROOT points at the repo)`,
+    };
+  }
+
+  if (lastExitCode !== null && lastExitCode !== 0) {
+    return {
+      name: `Self-healer: ${spec.name}`,
+      status: 'fail',
+      message: `Last run exited ${lastExitCode}`,
+      fix: `Inspect ~/.cortextos/<instance>/${spec.logRelativePath} and the matching .stderr.log for the failure reason`,
+    };
+  }
+
+  const logPath = join(ctxRoot, spec.logRelativePath);
+  const s = stat(logPath);
+  if (!s) {
+    return {
+      name: `Self-healer: ${spec.name}`,
+      status: 'warn',
+      message: `Registered but ${spec.logRelativePath} does not exist — script has not produced a successful cycle yet`,
+    };
+  }
+  const ageSec = (nowMs - s.mtimeMs) / 1000;
+  const thresholdSec = spec.expectedIntervalSec * (spec.staleThresholdMultiplier ?? 3);
+  if (ageSec > thresholdSec) {
+    return {
+      name: `Self-healer: ${spec.name}`,
+      status: 'warn',
+      message: `${spec.logRelativePath} stale by ${Math.floor(ageSec / 60)}m (expected cycle every ${spec.expectedIntervalSec}s)`,
+      fix: `Tail the log; if the script is genuinely broken, restart with: launchctl kickstart -k gui/$(id -u)/${spec.label}`,
+    };
+  }
+
+  return {
+    name: `Self-healer: ${spec.name}`,
+    status: 'pass',
+    message: `Last cycle ${Math.floor(ageSec)}s ago (cap ${thresholdSec}s)`,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Fleet-resilience plan #4 — health-check registry.
@@ -228,6 +397,11 @@ export async function runAllChecks(options: RunAllChecksOptions): Promise<Check[
       message: serviceRunning ? 'Running' : 'Not running',
       fix: !serviceRunning ? 'Run: cortextos tunnel start' : undefined,
     });
+
+    // ── Self-healing services liveness ──────────────────────────────────────
+    for (const spec of SELF_HEALER_SPECS) {
+      checks.push(assessSelfHealer({ spec, ctxRoot }));
+    }
 
     const tunnelConfigPath = join(homedir(), '.cortextos', instanceId, 'tunnel.json');
     let tunnelUrl: string | undefined;

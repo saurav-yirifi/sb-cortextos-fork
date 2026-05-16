@@ -16,7 +16,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { runAllChecks } from '../../../src/utils/health-checks';
+import {
+  runAllChecks,
+  interpretLaunchctlList,
+  assessSelfHealer,
+  SELF_HEALER_SPECS,
+  type SelfHealerSpec,
+} from '../../../src/utils/health-checks';
 
 let frameworkRoot: string;
 
@@ -104,6 +110,12 @@ describe('runAllChecks (fleet-resilience #4 extraction)', () => {
     expect(cq!.message).toContain('Not found');
   });
 
+  // ── 2026-05-16 post-mortem Finding 3 follow-up — meta-watchdog tests ──
+  // These exercise the assessSelfHealer helper directly via injection so the
+  // test does not need real launchctl / filesystem state. The runAllChecks
+  // integration that pushes these checks is exercised by the smoke test
+  // above (every Check satisfies the schema).
+
   it('flags analyst doc drift when templates/<file>.md is newer than active', async () => {
     const tpl = join(frameworkRoot, 'templates', 'analyst');
     const active = join(frameworkRoot, 'orgs', 'acme', 'agents', 'analyst');
@@ -126,5 +138,188 @@ describe('runAllChecks (fleet-resilience #4 extraction)', () => {
     expect(drift!.status).toBe('warn');
     expect(drift!.message).toContain('HEARTBEAT.md');
     expect(drift!.message).toContain('GUARDRAILS.md');
+  });
+});
+
+describe('interpretLaunchctlList', () => {
+  it('returns registered=false when launchctl list itself failed', () => {
+    expect(interpretLaunchctlList('', 1))
+      .toEqual({ registered: false, lastExitCode: null, lastSignal: null });
+  });
+
+  it('returns registered=true + lastExitCode=null when LastExitStatus is absent (never ran)', () => {
+    const stdout = `{
+\t"Label" = "com.cortextos.watchdog";
+\t"OnDemand" = true;
+};`;
+    expect(interpretLaunchctlList(stdout, 0))
+      .toEqual({ registered: true, lastExitCode: null, lastSignal: null });
+  });
+
+  it('decodes EX_CONFIG (78) from the wait-status word 19968', () => {
+    // 19968 = 78 << 8. This is the exact signature observed on Saurav's
+    // machine in the 2026-05-16 post-mortem.
+    const stdout = `{\n\t"LastExitStatus" = 19968;\n};`;
+    expect(interpretLaunchctlList(stdout, 0))
+      .toEqual({ registered: true, lastExitCode: 78, lastSignal: null });
+  });
+
+  it('decodes a clean exit (0) when wait-status word is 0', () => {
+    expect(interpretLaunchctlList(`{ "LastExitStatus" = 0; };`, 0))
+      .toEqual({ registered: true, lastExitCode: 0, lastSignal: null });
+  });
+
+  it('decodes exit code 1 from raw wait-status 256', () => {
+    expect(interpretLaunchctlList(`{ "LastExitStatus" = 256; };`, 0))
+      .toEqual({ registered: true, lastExitCode: 1, lastSignal: null });
+  });
+
+  it('surfaces signal kill (SIGKILL=9) as lastSignal, NOT as exit 0', () => {
+    // Regression: an earlier decoder did (raw >> 8) & 0xff unconditionally,
+    // so SIGKILL (raw=9) decoded to exit code 0 and the assessor returned
+    // pass — a killed self-healer silently appeared healthy. The split
+    // signal/exit-code surface prevents that.
+    expect(interpretLaunchctlList(`{ "LastExitStatus" = 9; };`, 0))
+      .toEqual({ registered: true, lastExitCode: null, lastSignal: 9 });
+  });
+});
+
+describe('assessSelfHealer', () => {
+  const watchdog: SelfHealerSpec = SELF_HEALER_SPECS[0];
+  const fakeCtxRoot = '/tmp/fake-ctxroot';
+
+  it('returns warn when service is not registered with launchd', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: '', status: 1 }),
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('Not registered');
+    expect(result.fix).toContain('cortextos install');
+  });
+
+  it('returns fail with explicit EX_CONFIG message on exit 78 (the post-mortem signature)', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 19968; };`, status: 0 }),
+    });
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('78');
+    expect(result.message).toContain('EX_CONFIG');
+    expect(result.fix).toContain('PR-X2');
+  });
+
+  it('returns fail on any other non-zero last exit code', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 256; };`, status: 0 }),
+    });
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('1');
+  });
+
+  it('returns warn when registered + clean exit but log file does not exist', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => null,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('does not exist');
+  });
+
+  it('returns warn when log is older than expectedIntervalSec × 3', () => {
+    const nowMs = 1_700_000_000_000;
+    // watchdog expectedIntervalSec=300 → threshold 900s. 1000s old = stale.
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 1000 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('stale');
+  });
+
+  it('returns pass when registered + clean exit + fresh log', () => {
+    const nowMs = 1_700_000_000_000;
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 60 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    expect(result.status).toBe('pass');
+    expect(result.message).toContain('Last cycle');
+  });
+
+  it('returns warn (does-not-exist branch) when service registered but never ran AND no log file', () => {
+    // Realistic "never ran" state: no LastExitStatus + no log file. The
+    // assessor falls through the non-zero-exit checks and hits the log
+    // staleness branch, which sees null from statSyncOverride.
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "Label" = "x"; };`, status: 0 }),
+      statSyncOverride: () => null,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('does not exist');
+  });
+
+  it('returns fail when last run was killed by signal (SIGKILL)', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 9; };`, status: 0 }),
+    });
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('signal 9');
+  });
+
+  it('payload-cap-drift uses the 1.5× multiplier so a broken daily job surfaces inside 36h', () => {
+    const dailyDrift = SELF_HEALER_SPECS.find((s) => s.name === 'payload-cap-drift')!;
+    expect(dailyDrift.staleThresholdMultiplier).toBe(1.5);
+    const nowMs = 1_700_000_000_000;
+    // 86400 × 1.5 = 129600s = 36h threshold. 48h old should warn.
+    const result = assessSelfHealer({
+      spec: dailyDrift,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 48 * 3600 * 1000 }),
+      nowMsOverride: nowMs,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('stale');
+  });
+});
+
+describe('SELF_HEALER_SPECS', () => {
+  it('contains exactly the 5 services from scripts/self-healing/', () => {
+    expect(SELF_HEALER_SPECS.map((s) => s.name).sort()).toEqual([
+      'agent-recover',
+      'compact-boundary-watcher',
+      'payload-cap-drift',
+      'usage-monitor',
+      'watchdog',
+    ]);
+  });
+
+  it('every spec has a launchd label matching the com.cortextos.<name> convention', () => {
+    for (const spec of SELF_HEALER_SPECS) {
+      expect(spec.label).toBe(`com.cortextos.${spec.name}`);
+    }
+  });
+
+  it('every spec has a positive expectedIntervalSec', () => {
+    for (const spec of SELF_HEALER_SPECS) {
+      expect(spec.expectedIntervalSec).toBeGreaterThan(0);
+    }
   });
 });
