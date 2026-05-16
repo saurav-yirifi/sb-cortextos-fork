@@ -143,7 +143,8 @@ describe('runAllChecks (fleet-resilience #4 extraction)', () => {
 
 describe('interpretLaunchctlList', () => {
   it('returns registered=false when launchctl list itself failed', () => {
-    expect(interpretLaunchctlList('', 1)).toEqual({ registered: false, lastExitCode: null });
+    expect(interpretLaunchctlList('', 1))
+      .toEqual({ registered: false, lastExitCode: null, lastSignal: null });
   });
 
   it('returns registered=true + lastExitCode=null when LastExitStatus is absent (never ran)', () => {
@@ -151,24 +152,35 @@ describe('interpretLaunchctlList', () => {
 \t"Label" = "com.cortextos.watchdog";
 \t"OnDemand" = true;
 };`;
-    expect(interpretLaunchctlList(stdout, 0)).toEqual({ registered: true, lastExitCode: null });
+    expect(interpretLaunchctlList(stdout, 0))
+      .toEqual({ registered: true, lastExitCode: null, lastSignal: null });
   });
 
   it('decodes EX_CONFIG (78) from the wait-status word 19968', () => {
     // 19968 = 78 << 8. This is the exact signature observed on Saurav's
     // machine in the 2026-05-16 post-mortem.
     const stdout = `{\n\t"LastExitStatus" = 19968;\n};`;
-    expect(interpretLaunchctlList(stdout, 0)).toEqual({ registered: true, lastExitCode: 78 });
+    expect(interpretLaunchctlList(stdout, 0))
+      .toEqual({ registered: true, lastExitCode: 78, lastSignal: null });
   });
 
   it('decodes a clean exit (0) when wait-status word is 0', () => {
     expect(interpretLaunchctlList(`{ "LastExitStatus" = 0; };`, 0))
-      .toEqual({ registered: true, lastExitCode: 0 });
+      .toEqual({ registered: true, lastExitCode: 0, lastSignal: null });
   });
 
   it('decodes exit code 1 from raw wait-status 256', () => {
     expect(interpretLaunchctlList(`{ "LastExitStatus" = 256; };`, 0))
-      .toEqual({ registered: true, lastExitCode: 1 });
+      .toEqual({ registered: true, lastExitCode: 1, lastSignal: null });
+  });
+
+  it('surfaces signal kill (SIGKILL=9) as lastSignal, NOT as exit 0', () => {
+    // Regression: an earlier decoder did (raw >> 8) & 0xff unconditionally,
+    // so SIGKILL (raw=9) decoded to exit code 0 and the assessor returned
+    // pass — a killed self-healer silently appeared healthy. The split
+    // signal/exit-code surface prevents that.
+    expect(interpretLaunchctlList(`{ "LastExitStatus" = 9; };`, 0))
+      .toEqual({ registered: true, lastExitCode: null, lastSignal: 9 });
   });
 });
 
@@ -247,17 +259,44 @@ describe('assessSelfHealer', () => {
     expect(result.message).toContain('Last cycle');
   });
 
-  it('returns null lastExitCode (treated as pass when log fresh) when service registered but never ran', () => {
-    const nowMs = 1_700_000_000_000;
+  it('returns warn (does-not-exist branch) when service registered but never ran AND no log file', () => {
+    // Realistic "never ran" state: no LastExitStatus + no log file. The
+    // assessor falls through the non-zero-exit checks and hits the log
+    // staleness branch, which sees null from statSyncOverride.
     const result = assessSelfHealer({
       spec: watchdog,
       ctxRoot: fakeCtxRoot,
       launchctlListOverride: () => ({ stdout: `{ "Label" = "x"; };`, status: 0 }),
-      statSyncOverride: () => ({ mtimeMs: nowMs - 30 * 1000 }),
+      statSyncOverride: () => null,
+    });
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('does not exist');
+  });
+
+  it('returns fail when last run was killed by signal (SIGKILL)', () => {
+    const result = assessSelfHealer({
+      spec: watchdog,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 9; };`, status: 0 }),
+    });
+    expect(result.status).toBe('fail');
+    expect(result.message).toContain('signal 9');
+  });
+
+  it('payload-cap-drift uses the 1.5× multiplier so a broken daily job surfaces inside 36h', () => {
+    const dailyDrift = SELF_HEALER_SPECS.find((s) => s.name === 'payload-cap-drift')!;
+    expect(dailyDrift.staleThresholdMultiplier).toBe(1.5);
+    const nowMs = 1_700_000_000_000;
+    // 86400 × 1.5 = 129600s = 36h threshold. 48h old should warn.
+    const result = assessSelfHealer({
+      spec: dailyDrift,
+      ctxRoot: fakeCtxRoot,
+      launchctlListOverride: () => ({ stdout: `{ "LastExitStatus" = 0; };`, status: 0 }),
+      statSyncOverride: () => ({ mtimeMs: nowMs - 48 * 3600 * 1000 }),
       nowMsOverride: nowMs,
     });
-    // No LastExitStatus → not fail; fresh log → pass.
-    expect(result.status).toBe('pass');
+    expect(result.status).toBe('warn');
+    expect(result.message).toContain('stale');
   });
 });
 

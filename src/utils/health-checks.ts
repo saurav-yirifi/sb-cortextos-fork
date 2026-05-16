@@ -19,40 +19,59 @@ export interface SelfHealerSpec {
   label: string;                // launchd label, e.g. 'com.cortextos.watchdog'
   logRelativePath: string;      // path under ~/.cortextos/<instance>/
   expectedIntervalSec: number;  // StartInterval or CalendarInterval cadence
+  /** Multiplier on expectedIntervalSec for the log-staleness threshold.
+   *  Defaults to 3 (allow two missed ticks). Daily-cadence services use
+   *  1.5 so a broken job is surfaced inside 36h, not 72h. */
+  staleThresholdMultiplier?: number;
 }
 
+// TODO(PR-X4): post-mortem A.3 Why 5 — add a `cortextos doctor` check that
+// diffs the live plist `PATH` against `which pm2 / ccusage / cortextos`
+// and warns on drift. Out of scope for PR-X3 (which detects *failure*; the
+// PATH-drift check would detect *future-failure*).
 export const SELF_HEALER_SPECS: SelfHealerSpec[] = [
   { name: 'watchdog',                 label: 'com.cortextos.watchdog',                 logRelativePath: 'logs/watchdog.log',                 expectedIntervalSec: 300 },
   { name: 'agent-recover',            label: 'com.cortextos.agent-recover',            logRelativePath: 'logs/agent-recover.log',            expectedIntervalSec: 300 },
   { name: 'usage-monitor',            label: 'com.cortextos.usage-monitor',            logRelativePath: 'logs/usage-monitor.log',            expectedIntervalSec: 1800 },
   { name: 'compact-boundary-watcher', label: 'com.cortextos.compact-boundary-watcher', logRelativePath: 'logs/compact-boundary-watcher.log', expectedIntervalSec: 600 },
-  { name: 'payload-cap-drift',        label: 'com.cortextos.payload-cap-drift',        logRelativePath: 'logs/payload-cap-drift.log',        expectedIntervalSec: 86_400 },
+  { name: 'payload-cap-drift',        label: 'com.cortextos.payload-cap-drift',        logRelativePath: 'logs/payload-cap-drift.log',        expectedIntervalSec: 86_400, staleThresholdMultiplier: 1.5 },
 ];
 
 export interface LaunchctlListInterpretation {
   registered: boolean;
-  lastExitCode: number | null;  // null when LastExitStatus not present (service never ran)
+  /** Exit code when the last run terminated normally. null when LastExitStatus
+   *  is absent (service never ran) or when terminated by signal. */
+  lastExitCode: number | null;
+  /** Signal number when the last run was killed by a signal (e.g. SIGKILL=9).
+   *  null when normally terminated or never ran. */
+  lastSignal: number | null;
 }
 
 /**
  * Parse `launchctl list <label>` output. The format is NeXTSTEP-plist-like
  * key/value pairs separated by semicolons. We only care about
- * `LastExitStatus = N`. N is the raw Unix wait-status word: the low byte
- * holds the signal that terminated the child and the next byte up holds
- * the exit code. Shift right 8 + mask to extract the exit code; if the
- * service has never run yet, the key is absent and we return null.
+ * `LastExitStatus = N`. N is the raw Unix wait-status word:
+ *   - low 7 bits  = signal that terminated the child (0 if not signaled)
+ *   - next byte   = exit code (only meaningful when signal byte is 0)
+ * Negative values (observed on some macOS versions for mid-run unloads)
+ * round-trip through the same bit-twiddling correctly — `(-1 >> 8) & 0xff`
+ * is 255, which surfaces as a generic non-zero exit.
  *
  * `listExitCode` is the exit of `launchctl list` itself: non-zero means
  * the label is not registered with launchd at all.
  */
 export function interpretLaunchctlList(stdout: string, listExitCode: number): LaunchctlListInterpretation {
-  if (listExitCode !== 0) return { registered: false, lastExitCode: null };
+  if (listExitCode !== 0) return { registered: false, lastExitCode: null, lastSignal: null };
   const m = stdout.match(/"?LastExitStatus"?\s*=\s*(-?\d+)/);
-  if (!m) return { registered: true, lastExitCode: null };
+  if (!m) return { registered: true, lastExitCode: null, lastSignal: null };
   const raw = parseInt(m[1], 10);
-  // Wait-status: signal in low byte, exit code in next byte up. When a job
-  // exits cleanly the signal byte is 0 and raw === exitCode << 8.
-  return { registered: true, lastExitCode: (raw >> 8) & 0xff };
+  const signal = raw & 0x7f;
+  if (signal !== 0) {
+    // Signal-killed: exit code field is meaningless per POSIX. Surface the
+    // signal separately so SIGKILL doesn't masquerade as exit 0.
+    return { registered: true, lastExitCode: null, lastSignal: signal };
+  }
+  return { registered: true, lastExitCode: (raw >> 8) & 0xff, lastSignal: null };
 }
 
 export interface AssessSelfHealerOptions {
@@ -90,7 +109,7 @@ export function assessSelfHealer(opts: AssessSelfHealerOptions): Check {
   });
 
   const { stdout, status } = launchctlList(spec.label);
-  const { registered, lastExitCode } = interpretLaunchctlList(stdout, status);
+  const { registered, lastExitCode, lastSignal } = interpretLaunchctlList(stdout, status);
 
   if (!registered) {
     return {
@@ -98,6 +117,15 @@ export function assessSelfHealer(opts: AssessSelfHealerOptions): Check {
       status: 'warn',
       message: `Not registered with launchd`,
       fix: `Run: cortextos install (re-renders ~/Library/LaunchAgents/${spec.label}.plist and bootstraps it)`,
+    };
+  }
+
+  if (lastSignal !== null) {
+    return {
+      name: `Self-healer: ${spec.name}`,
+      status: 'fail',
+      message: `Last run killed by signal ${lastSignal}`,
+      fix: `Inspect ~/.cortextos/<instance>/${spec.logRelativePath} and the matching .stderr.log; signal-kills often mean the daemon was forcibly stopped or hit a resource limit`,
     };
   }
 
@@ -129,7 +157,7 @@ export function assessSelfHealer(opts: AssessSelfHealerOptions): Check {
     };
   }
   const ageSec = (nowMs - s.mtimeMs) / 1000;
-  const thresholdSec = spec.expectedIntervalSec * 3;
+  const thresholdSec = spec.expectedIntervalSec * (spec.staleThresholdMultiplier ?? 3);
   if (ageSec > thresholdSec) {
     return {
       name: `Self-healer: ${spec.name}`,
